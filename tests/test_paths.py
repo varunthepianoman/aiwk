@@ -18,7 +18,7 @@ class PathTests(unittest.TestCase):
             expected = [
                 "aiwk.yaml", "spec/project.spec.md", "spec/invariants.yaml", "spec/gates.yaml",
                 "scripts/preflight.sh", "scripts/context_pack.sh", "scripts/checkpoint_commit.sh",
-                "state", "logs",
+                "workflow.yaml", "state", "logs", "generated",
             ]
             self.assertTrue(all((root / item).exists() for item in expected))
             config = load_config(result["config_path"])

@@ -1,0 +1,58 @@
+python3 -m pytest -q
+python3 -m aiwk --help
+python3 -m aiwk init --help
+python3 -m aiwk preflight --help
+python3 -m aiwk context-pack --help
+python3 -m aiwk checkpoint --help
+
+
+TMP=$(mktemp -d)
+cd "$TMP"
+
+mkdir target_repo
+cd target_repo
+git init
+git config user.email "test@example.com"
+git config user.name "Test User"
+echo "hello" > README.md
+git add README.md
+git commit -m "init"
+cd ..
+
+python3 -m aiwk init \
+  --project demo_project \
+  --repo "$TMP/target_repo" \
+  --workflow-folder "$TMP/ai_workflows"
+
+find "$TMP/ai_workflows/demo_project" -maxdepth 3 -type f | sort
+
+python3 -m aiwk preflight \
+  --config "$TMP/ai_workflows/demo_project/aiwk.yaml"
+
+python3 -m aiwk context-pack \
+  --config "$TMP/ai_workflows/demo_project/aiwk.yaml" \
+  --phase DEMO_SS0_DEV
+
+cd "$TMP/target_repo"
+echo "change" >> README.md
+cd -
+
+python3 -m aiwk checkpoint \
+  --config "$TMP/ai_workflows/demo_project/aiwk.yaml" \
+  --step DEMO_SS0
+
+cd "$TMP/target_repo"
+git log --oneline -3
+git status --short
+
+
+cd ~/dev/aiwk
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+python3 -m pip install -U pip
+python3 -m pip install -e . pytest
+
+python3 -m pytest -q
+python3 -m aiwk --help

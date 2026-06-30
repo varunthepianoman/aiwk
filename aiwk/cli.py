@@ -11,15 +11,17 @@ from .config import Config, dump_config, load_config, project_folder
 from .context_pack import create_context_pack
 from .git_utils import git_snapshot, relevant_dirty_files, run_git
 from .scripts import write_scripts
+from .workflow_spec import starter_workflow
 
 
 def initialize(project: str, repo: str, workflow_folder: str) -> dict[str, str]:
     root = project_folder(workflow_folder, project)
-    for directory in (root / "spec", root / "scripts", root / "state", root / "logs"):
+    for directory in (root / "spec", root / "scripts", root / "state", root / "logs", root / "generated"):
         directory.mkdir(parents=True, exist_ok=True)
     config_path = root / "aiwk.yaml"
     config = Config(project, repo, workflow_folder, str(root))
     dump_config(config, config_path)
+    (root / "workflow.yaml").write_text(starter_workflow(project), encoding="utf-8")
     (root / "spec" / "project.spec.md").write_text(
         f"# Project Spec: {project}\n\n## Goal\n\nTODO\n\n## Source of Truth\n\nTODO\n\n"
         "## Non-goals\n\nTODO\n\n## Workflow Notes\n\nTODO\n",
@@ -67,6 +69,12 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--phase", required=True)
         if name == "checkpoint":
             command.add_argument("--step", required=True)
+    render_command = commands.add_parser("render")
+    render_targets = render_command.add_subparsers(dest="render_target", required=True)
+    claude = render_targets.add_parser("claude-workflow")
+    claude.add_argument("--config", required=True, type=Path)
+    claude.add_argument("--workflow-spec", type=Path)
+    claude.add_argument("--out", type=Path)
     return result
 
 
@@ -75,6 +83,9 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.command == "init":
             result = initialize(args.project, args.repo, args.workflow_folder)
+        elif args.command == "render":
+            from .render import render
+            result = render(args.config, args.workflow_spec, args.out)
         else:
             config = load_config(args.config)
             if args.command == "preflight":
@@ -87,4 +98,3 @@ def main(argv: list[str] | None = None) -> None:
     except (OSError, ValueError, RuntimeError) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
         raise SystemExit(1) from None
-
