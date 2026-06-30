@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aiwk"
+version = "0.1.0"
+description = "Small, durable scaffolding for AI coding workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "aiwk contributors" }]
+
+[project.scripts]
+aiwk = "aiwk.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["aiwk*"]
+
