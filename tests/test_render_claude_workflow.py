@@ -167,7 +167,7 @@ class ClaudeWorkflowRenderTests(unittest.TestCase):
             "GATE_SCHEMA", "buildGatePrompt", "formatGateResult", "computeGateClean",
             "OBJECTIVE BUILD GATE", "setup_rc", "build_rc", "test_rc", "result_rc",
             "check_results", "raw_tail", "gateClean",
-            "accepted = gateClean && !!(review && review.accepted)",
+            "accepted = gateClean && reviewAccepted(review)",
             "Your acceptance is necessary but not sufficient",
             "You cannot make a red build/test/check pass",
             "The Commit phase is responsible",
@@ -185,6 +185,20 @@ class ClaudeWorkflowRenderTests(unittest.TestCase):
         self.assertIn(sys.executable, text)
         self.assertIn(str(self.config_path.resolve()), text)
         self.assertIn(str((self.project_root / "workflow.yaml").resolve()), text)
+
+    def test_review_acceptance_requires_all_review_quality_flags(self):
+        output = Path(render(self.config_path)["output_path"])
+        text = output.read_text(encoding="utf-8")
+        for marker in (
+            "function reviewAccepted(review)",
+            "review.accepted === true",
+            "review.scope_clean === true",
+            "review.build_passed === true",
+            "review.gtests_passed === true",
+            "accepted = gateClean && reviewAccepted(review)",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
 
     def test_workflow_without_objective_gate_still_renders_mature_flow(self):
         output = Path(render(self.config_path)["output_path"])

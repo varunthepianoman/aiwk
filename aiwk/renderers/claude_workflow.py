@@ -369,6 +369,16 @@ function selectSteps(stage, fromStep, onlyStep) {
   return selectedStage.steps;
 }
 
+function reviewAccepted(review) {
+  return Boolean(
+    review &&
+    review.accepted === true &&
+    review.scope_clean === true &&
+    review.build_passed === true &&
+    review.gtests_passed === true
+  );
+}
+
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
@@ -619,8 +629,7 @@ ${step.prompt.dev}`, runtime),
           withBeadsContext(buildReviewerPrompt(step, gate, gateClean), runtime),
           agentOptions({ label: `${step.id} review ${attempt}`, phase: step.id, model: step.model, effort: "high", schema: REVIEW_SCHEMA })
         );
-        accepted = gateClean && !!(review && review.accepted);
-        if (accepted && review.scope_clean !== true) accepted = false;
+        accepted = gateClean && reviewAccepted(review);
       } else {
         accepted = gateClean;
       }
