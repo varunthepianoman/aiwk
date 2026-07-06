@@ -11,26 +11,23 @@ from .config import Config, dump_config, load_config, project_folder
 from .context_pack import create_context_pack
 from .git_utils import git_snapshot, relevant_dirty_files, run_git
 from .scripts import write_scripts
-from .workflow_spec import starter_workflow
+from .templates import TEMPLATE_NAMES, get_template
 
 
-def initialize(project: str, repo: str, workflow_folder: str) -> dict[str, str]:
+def initialize(project: str, repo: str, workflow_folder: str, template: str = "generic") -> dict[str, str]:
     root = project_folder(workflow_folder, project)
     for directory in (root / "spec", root / "scripts", root / "state", root / "logs", root / "generated"):
         directory.mkdir(parents=True, exist_ok=True)
     config_path = root / "aiwk.yaml"
     config = Config(project, repo, workflow_folder, str(root))
     dump_config(config, config_path)
-    (root / "workflow.yaml").write_text(starter_workflow(project), encoding="utf-8")
-    (root / "spec" / "project.spec.md").write_text(
-        f"# Project Spec: {project}\n\n## Goal\n\nTODO\n\n## Source of Truth\n\nTODO\n\n"
-        "## Non-goals\n\nTODO\n\n## Workflow Notes\n\nTODO\n",
-        encoding="utf-8",
-    )
-    (root / "spec" / "invariants.yaml").write_text("invariants: []\n", encoding="utf-8")
-    (root / "spec" / "gates.yaml").write_text("gates: []\n", encoding="utf-8")
+    selected = get_template(template, project)
+    (root / "workflow.yaml").write_text(selected.workflow, encoding="utf-8")
+    (root / "spec" / "project.spec.md").write_text(selected.project_spec, encoding="utf-8")
+    (root / "spec" / "invariants.yaml").write_text(selected.invariants, encoding="utf-8")
+    (root / "spec" / "gates.yaml").write_text(selected.gates, encoding="utf-8")
     write_scripts(root / "scripts", config_path)
-    return {"status": "initialized", "project_folder": str(root), "config_path": str(config_path)}
+    return {"status": "initialized", "project_folder": str(root), "config_path": str(config_path), "template": template}
 
 
 def preflight(config: Config, config_path: Path) -> dict[str, object]:
@@ -62,11 +59,20 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--project", required=True)
     init.add_argument("--repo", required=True)
     init.add_argument("--workflow-folder", required=True)
+    init.add_argument("--template", choices=TEMPLATE_NAMES, default="generic")
+    templates = commands.add_parser("templates")
+    template_commands = templates.add_subparsers(dest="template_command", required=True)
+    template_commands.add_parser("list")
     for name in ("preflight", "context-pack", "checkpoint"):
         command = commands.add_parser(name)
         command.add_argument("--config", required=True, type=Path)
         if name == "context-pack":
             command.add_argument("--phase", required=True)
+            command.add_argument("--step")
+            command.add_argument("--include-diff", action="store_true")
+            command.add_argument("--max-diff-lines", type=int, default=80)
+            command.add_argument("--gate-evidence", type=Path)
+            command.add_argument("--beads-snapshot-file", type=Path)
         if name == "checkpoint":
             command.add_argument("--step", required=True)
     render_command = commands.add_parser("render")
@@ -75,6 +81,13 @@ def parser() -> argparse.ArgumentParser:
     claude.add_argument("--config", required=True, type=Path)
     claude.add_argument("--workflow-spec", type=Path)
     claude.add_argument("--out", type=Path)
+    gate_run = commands.add_parser("gate-run")
+    gate_run.add_argument("--config", required=True, type=Path)
+    gate_run.add_argument("--workflow-spec", type=Path)
+    gate_run.add_argument("--gate", required=True)
+    gate_run.add_argument("--step", required=True)
+    gate_run.add_argument("--attempt", required=True, type=int)
+    gate_run.add_argument("--repo", type=Path)
     return result
 
 
@@ -82,16 +95,31 @@ def main(argv: list[str] | None = None) -> None:
     args = parser().parse_args(argv)
     try:
         if args.command == "init":
-            result = initialize(args.project, args.repo, args.workflow_folder)
+            result = initialize(args.project, args.repo, args.workflow_folder, args.template)
+        elif args.command == "templates":
+            result = {"status": "ok", "templates": list(TEMPLATE_NAMES)}
         elif args.command == "render":
             from .render import render
             result = render(args.config, args.workflow_spec, args.out)
+        elif args.command == "gate-run":
+            from .gate_runner import run_objective_gate
+            result = run_objective_gate(
+                args.config,
+                args.gate,
+                args.step,
+                args.attempt,
+                args.workflow_spec,
+                args.repo,
+            )
         else:
             config = load_config(args.config)
             if args.command == "preflight":
                 result = preflight(config, args.config)
             elif args.command == "context-pack":
-                result = create_context_pack(config, args.config, args.phase)
+                result = create_context_pack(
+                    config, args.config, args.phase, args.step, args.include_diff,
+                    args.max_diff_lines, args.gate_evidence, args.beads_snapshot_file,
+                )
             else:
                 result = checkpoint(config, args.config, args.step)
         print(json.dumps(result, separators=(",", ":")))

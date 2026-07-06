@@ -15,6 +15,8 @@ def render(config_path: Path, workflow_spec_path: Path | None = None, out_path: 
     out_path = (out_path or project_root / "generated" / f"{config.project}.claude_workflow.js").expanduser().resolve()
     spec = load_workflow_spec(workflow_spec_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_claude_workflow(config, config_path, spec), encoding="utf-8")
+    out_path.write_text(
+        render_claude_workflow(config, config_path, spec, workflow_spec_path),
+        encoding="utf-8",
+    )
     return {"status": "rendered", "workflow_spec": str(workflow_spec_path), "output_path": str(out_path)}
-

@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../t_robotics"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": "../.aiwk"
+		}
+	],
+	"settings": {}
+}
