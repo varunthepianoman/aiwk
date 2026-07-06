@@ -1,6 +1,6 @@
-# Prompt forclaude: Upgrade AIWK Claude Workflow Renderer to Match Mature Handwritten Workflows
+# Prompt for claude: Upgrade AIWK Claude Workflow Renderer to Match Mature Handwritten Workflows
 
-You areclaude developing AIWK itself. You are in a 3-folder VS Code workspace:
+You are claude developing AIWK itself. You are in a 3-folder VS Code workspace:
 
 ```text
 ~/dev/t_robotics   # robotics repo / target repo

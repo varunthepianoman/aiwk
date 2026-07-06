@@ -1,4 +1,4 @@
-# AIWK QAclaude Bundle
+# AIWK QA claude Bundle
 
 This bundle contains aclaude prompt and shell scripts for testing AIWK locally without launching expensive Claude runtime workflows.
 
