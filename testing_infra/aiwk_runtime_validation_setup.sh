@@ -114,10 +114,10 @@ stages:
           - review
           - commit
         prompt:
-          scope: Write or update a tiny black-box pytest test under tests/ that validates runtime_marker.txt contains the exact string AIWK_RUNTIME_VALIDATED followed by a newline. Do not edit implementation files in this phase.
-          dev: Create runtime_marker.txt at the repo root containing exactly AIWK_RUNTIME_VALIDATED followed by a newline. Run the targeted pytest if available.
+          scope: Write or update a tiny black-box unittest under tests/ that validates runtime_marker.txt contains the exact string AIWK_RUNTIME_VALIDATED followed by a newline. Do not edit implementation files in this phase.
+          dev: Create runtime_marker.txt at the repo root containing exactly AIWK_RUNTIME_VALIDATED followed by a newline. Run the targeted unittest.
           redteam: Inspect the implementation and test. Try to find a minimal adversarial failure for the marker-file requirement. Do not patch implementation.
-          review: Verify the repo has runtime_marker.txt with exactly AIWK_RUNTIME_VALIDATED, the targeted pytest passes if pytest is available, and no unrelated files were changed.
+          review: Verify the repo has runtime_marker.txt with exactly AIWK_RUNTIME_VALIDATED, the objective gate passed, and no unrelated files were changed.
 YAML
 
 cat > "$PROJECT_DIR/spec/project.spec.md" <<'SPEC'
@@ -156,7 +156,7 @@ gates:
   - id: marker-content-exact
     description: runtime_marker.txt content is exactly AIWK_RUNTIME_VALIDATED plus newline.
   - id: targeted-test-passes
-    description: tests/test_runtime_marker.py passes if pytest is available in the environment.
+    description: unittest discovery runs tests/test_runtime_marker.py successfully.
   - id: clean-or-intentional-status
     description: git status is clean after the commit phase, or any remaining files are explicitly explained.
 YAML
@@ -223,7 +223,7 @@ cd "$TARGET_REPO"
 git log --oneline -5
 git status --short
 cat runtime_marker.txt
-python - <<'PY'
+"$AIWK_PY" - <<'PY'
 from pathlib import Path
 p = Path('runtime_marker.txt')
 assert p.read_text(encoding='utf-8') == 'AIWK_RUNTIME_VALIDATED\\n'

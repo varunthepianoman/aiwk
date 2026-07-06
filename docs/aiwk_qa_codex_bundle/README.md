@@ -2,6 +2,8 @@
 
 This bundle contains a Codex prompt and shell scripts for testing AIWK locally without launching expensive Claude runtime workflows.
 
+For product usage rather than QA execution, see the repository [README](../../README.md), [user guide](../user-guide.md), and [architecture guide](../architecture.md).
+
 ## Files
 
 ```text

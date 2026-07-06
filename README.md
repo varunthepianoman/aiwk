@@ -1,108 +1,304 @@
-# aiwk
+# AIWK
 
-`aiwk` is a small Python CLI for creating and maintaining durable, per-project AI coding workflow scaffolding. Pass 1 covers specs, invariants, gates, preflight checks, context handoffs, and checkpoint commits without introducing an orchestration framework.
+AIWK is a Python CLI for building durable, reviewable AI coding workflows around an existing Git repository. It keeps project intent, invariants, objective checks, execution state, and handoffs outside the chat transcript, then renders that durable configuration into a Claude Workflow JavaScript artifact.
 
-It uses the Python standard library and requires Python 3.10 or newer.
+AIWK does not replace the target repository or silently edit it during initialization. A typical layout keeps workflow projects in a separate directory:
 
-## Install
-
-```bash
-python -m pip install -e .
+```text
+~/dev/my_repo                 # target source repository
+~/dev/.aiwk/my_change         # durable AIWK project
+~/dev/aiwk                    # AIWK tool source/install
 ```
 
-## Initialize a project
+## What AIWK provides
+
+- Project scaffolding with durable specs, invariants, and gates.
+- Reusable templates for generic work, ROS 2 refactors, and adversarial bug fixes.
+- Compact Git preflight reports with detailed logs.
+- A provider-neutral `workflow.yaml` source of truth.
+- A mature Claude Workflow renderer with bounded Scope → Dev → Red Team → Gate → Review → Commit control flow.
+- Deterministic objective-gate execution with timeouts, full logs, JSON evidence, Git snapshots, and SHA-256 integrity metadata.
+- Configurable commit policies and post-commit clean-tree enforcement.
+- Optional Beads guidance without requiring Beads for every project.
+- Rich context packs for cold starts, resumptions, and agent handoffs.
+
+## Requirements and installation
+
+AIWK uses Python 3.10 or newer and the standard library at runtime. Install it from the repository in a virtual environment:
 
 ```bash
-aiwk init --project p3s_socket_e2e --repo /workspaces/t_robotics --workflow-folder ai_workflows
+cd ~/dev/aiwk
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/aiwk --help
 ```
 
-The workflow root is configurable. This example creates `ai_workflows/p3s_socket_e2e/`; it does not modify the target repository.
+Use the intended virtual environment when running `aiwk init`. Generated shell wrappers pin the interpreter used at initialization, so they do not depend on a later shell activation or a system `python` alias.
 
-## Commands
+## Quick start
+
+Initialize a workflow project next to, not inside, the target repository:
 
 ```bash
-aiwk preflight --config ai_workflows/p3s_socket_e2e/aiwk.yaml
-aiwk context-pack --config ai_workflows/p3s_socket_e2e/aiwk.yaml --phase PHASE_1
-aiwk checkpoint --config ai_workflows/p3s_socket_e2e/aiwk.yaml --step STEP_1
+~/dev/aiwk/.venv/bin/aiwk init \
+  --project my_refactor \
+  --repo ~/dev/my_repo \
+  --workflow-folder ~/dev/.aiwk \
+  --template generic
 ```
 
-Each command prints compact JSON. Detailed git output is written beneath the project's `logs/` directory. The generated shell wrappers offer the same operations; context and checkpoint wrappers accept the phase or step as their first argument.
+Edit the durable inputs before running serious work:
 
-Generated wrappers pin the Python interpreter used to run `aiwk init`. Initialize from the intended virtual environment so later wrapper calls do not depend on shell activation or a system `python` alias.
+```text
+~/dev/.aiwk/my_refactor/workflow.yaml
+~/dev/.aiwk/my_refactor/spec/project.spec.md
+~/dev/.aiwk/my_refactor/spec/invariants.yaml
+~/dev/.aiwk/my_refactor/spec/gates.yaml
+```
 
-Claude/Codex integration and workflow generation are intentionally out of scope for Pass 1.
+Run preflight and render the Claude Workflow artifact:
 
-## Pass 2: Rendering a Claude Workflow
+```bash
+CFG=~/dev/.aiwk/my_refactor/aiwk.yaml
 
-1. Initialize a project.
-2. Edit the generated `workflow.yaml`.
-3. Render it:
+~/dev/aiwk/.venv/bin/aiwk preflight --config "$CFG"
+~/dev/aiwk/.venv/bin/aiwk render claude-workflow --config "$CFG"
+```
 
-   ```bash
-   aiwk render claude-workflow --config ai_workflows/p3s_socket_e2e/aiwk.yaml
-   ```
+The generated script is written to:
 
-4. Use `generated/p3s_socket_e2e.claude_workflow.js` with Claude Workflow.
+```text
+~/dev/.aiwk/my_refactor/generated/my_refactor.claude_workflow.js
+```
 
-To select different paths, pass `--workflow-spec path/to/workflow.yaml` and `--out path/to/workflow.js`.
+`workflow.yaml` and the spec files are the durable source of truth. The JavaScript is a generated execution artifact; rerender it whenever those inputs change.
 
-The Claude Workflow JavaScript is a generated execution artifact. The durable source of truth is `workflow.yaml` together with `spec/project.spec.md`, `spec/invariants.yaml`, and `spec/gates.yaml`. Future passes may add richer gate and invariant injection and other render targets.
+## Recommended operating cycle
 
-Pass 2 only renders JavaScript; it does not run Claude or invoke external agents. Codex rendering, Beads automation, token accounting, and complex orchestration remain out of scope.
+1. Initialize from the closest template.
+2. Replace every placeholder and narrow the project spec and non-goals.
+3. Define objective gate commands that are deterministic in the target repository.
+4. Run `preflight` and resolve unrelated dirty files before launching a workflow.
+5. Render the workflow and syntax-check the generated JavaScript where Node is available.
+6. Launch the generated script through the Claude Workflow runtime with optional `stage`, `onlyStep`, `fromStep`, preflight, handoff, and Beads context.
+7. Inspect gate evidence and the final structured workflow result.
+8. Create a `context-pack` before a pause, handoff, or resume.
 
-To stay dependency-free, `workflow.yaml` supports the straightforward mappings, lists, and scalar values used by the generated starter file. Advanced YAML features such as anchors, tags, multiline scalars, and inline collections are not supported in Pass 2.
+## Generated project structure
 
-The current Claude renderer uses bounded Scope → Developer → Red Team → Reviewer → Commit control flow. Red Team failures return to Developer for up to two cycles, rejected reviews receive one Developer fix pass, and commit prompts require explicit-path staging only after accepted review. Durable project specs, invariants, and gates are embedded into the generated execution artifact at render time.
+```text
+<workflow-folder>/<project>/
+  aiwk.yaml
+  workflow.yaml
+  spec/
+    project.spec.md
+    invariants.yaml
+    gates.yaml
+  scripts/
+    preflight.sh
+    context_pack.sh
+    checkpoint_commit.sh
+  state/
+    gates/
+    <PHASE>_context.json
+    <PHASE>_handoff.md
+  logs/
+    gates/
+  generated/
+    <project>.claude_workflow.js
+```
 
-### Objective gates
+## CLI overview
 
-Pass 3 supports optional named `objective_gates` in `workflow.yaml`. A step selects one with `objective_gate: <name>`. Gates contain `setup`, `build`, `test`, and `result` command lists plus optional named output-count checks. The generated workflow runs the selected gate before review and requires both a clean gate and reviewer acceptance before commit. Workflows that omit objective gates retain the previous behavior.
+| Command | Purpose |
+| --- | --- |
+| `aiwk init` | Create a project from a built-in template. |
+| `aiwk templates list` | List installed project templates. |
+| `aiwk preflight` | Report Git head, branch, and relevant dirty files. |
+| `aiwk render claude-workflow` | Validate `workflow.yaml` and render Claude Workflow JS. |
+| `aiwk gate-run` | Execute one named objective gate and write evidence/logs. |
+| `aiwk context-pack` | Create durable JSON and Markdown handoff artifacts. |
+| `aiwk checkpoint` | Mechanically stage all target-repo changes and commit with an exact step ID. |
+
+All operational commands print compact JSON. Verbose Git and gate output goes to project logs.
+
+## Templates
+
+List templates:
+
+```bash
+aiwk templates list
+```
+
+Available templates:
+
+- `generic`: one general-purpose scoped change.
+- `ros2_refactor`: three-step ROS 2 C++ refactor with editable `TODO_PACKAGE` commands.
+- `bugfix_redteam`: reproduce/pin first, then implement and adversarially validate the fix.
+
+Example:
+
+```bash
+aiwk init \
+  --project controller_cleanup \
+  --repo ~/dev/controller \
+  --workflow-folder ~/dev/.aiwk \
+  --template ros2_refactor
+```
+
+Templates are starter material. Replace package names, commands, task boundaries, and TODO sections before launching agents.
+
+## Objective gates
+
+A step may reference a named objective gate:
 
 ```yaml
 objective_gates:
   default:
     enabled: true
-    build:
+    timeout_seconds: 300
+    setup:
+      timeout_seconds: 30
       commands:
-        - python -m py_compile example.py
+        - python --version
+    build:
+      timeout_seconds: 120
+      commands:
+        - python -m py_compile src/example.py
     test:
       commands:
-        - python -m unittest
+        - python -m unittest discover -s tests
     result:
       commands:
         - "true"
     checks:
       - name: no_forbidden_marker
-        command: 'grep -R "FORBIDDEN_MARKER" .'
+        command: 'grep -R "FORBIDDEN_MARKER" src tests'
         max_count: 0
+        timeout_seconds: 20
+
+stages:
+  build:
+    steps:
+      - id: DEMO_SS0
+        objective_gate: default
+        # remaining step fields...
 ```
 
-Run a gate directly to capture durable evidence:
+The generated Objective Gate agent runs one pinned `aiwk gate-run` command. AIWK itself executes the configured shell snippets in order, applies per-command timeouts, and records the last nonzero return code in each section. It writes:
+
+- full output under `logs/gates/`;
+- structured evidence under `state/gates/`;
+- command timing and timeout metadata;
+- before/after Git state;
+- hashes for config, workflow, gate configuration, log, and evidence.
+
+Gate cleanliness requires `build_rc`, `test_rc`, and `result_rc` to be zero and every check count to be within its configured threshold. `setup_rc` is recorded but is not enforced. A successfully captured failing gate exits `gate-run` with process status zero and reports `gate_clean:false`; runner/configuration errors exit nonzero.
+
+Run a gate manually:
 
 ```bash
 aiwk gate-run \
-  --config ai_workflows/demo/aiwk.yaml \
+  --config ~/dev/.aiwk/my_refactor/aiwk.yaml \
   --gate default \
   --step DEMO_SS0 \
   --attempt 1
 ```
 
-`gate-run` executes each configured shell snippet in order from the target repository, writes full logs under `logs/gates/`, writes hashed JSON evidence under `state/gates/`, and prints compact JSON. A captured command failure still exits successfully with `gate_clean:false`; invalid configuration or runner failures exit nonzero. Commands use the platform `/bin/sh` through Python’s `shell=True`. Per-command timeouts default to 300 seconds and can be overridden at gate, section, or check level.
+Gate commands are trusted workflow configuration and currently run through `/bin/sh` with Python `shell=True`.
 
-## Templates
+## Commit policies
 
-- `generic`
-- `ros2_refactor`
-- `bugfix_redteam`
+Configure commit behavior at the top level or override it per step:
 
-List them with `aiwk templates list`, or initialize one directly:
-
-```bash
-aiwk init \
-  --project my_refactor \
-  --repo ~/dev/my_repo \
-  --workflow-folder ~/dev/.aiwk \
-  --template ros2_refactor
+```yaml
+commit:
+  mode: mechanical_all
+  message_template: "{step_id}: {step_title}"
+  agent:
+    model: sonnet
+    effort: low
 ```
 
-Template output is starter material. Replace commands, package names, boundaries, and TODO sections before serious runs.
+Supported modes:
+
+- `mechanical_all`: after gate and review acceptance, run `git add -A`, commit, and require a clean final status.
+- `mechanical_paths`: legacy explicit-path staging based on files reported by workflow agents.
+- `none`: skip the commit phase and return a structured skipped result.
+
+Message templates support `{step_id}`, `{step_title}`, `{project}`, and `{stage}`. Unknown variables fail validation.
+
+`mechanical_all` intentionally moves intelligence before commit: preflight should start clean, the reviewer must reject unrelated dirty files, and commit then stages mechanically. Do not use it in a repository where unrelated dirty changes are acceptable.
+
+The standalone `aiwk checkpoint` command is separate from rendered commit policy. It always runs `git add -A` and commits with the exact `--step` value.
+
+## Context packs and handoffs
+
+Create a compact handoff:
+
+```bash
+aiwk context-pack \
+  --config ~/dev/.aiwk/my_refactor/aiwk.yaml \
+  --phase DEV_TO_REVIEW \
+  --step DEMO_SS0 \
+  --include-diff \
+  --max-diff-lines 80 \
+  --gate-evidence ~/dev/.aiwk/my_refactor/state/gates/example.json \
+  --beads-snapshot-file /tmp/beads_snapshot.txt
+```
+
+The JSON and Markdown outputs include Git state, changed files, diff stat, an optional bounded diff excerpt, preflight/log pointers, objective gate evidence, optional Beads context, recent result pointers, and next-agent instructions. Without `--include-diff`, full diff content is kept out of the handoff to avoid prompt bloat.
+
+## Optional Beads guidance
+
+Beads is opt-in:
+
+```yaml
+beads:
+  enabled: true
+  project_hint: controller-refactor
+  require_before_edit: true
+  allow_create_issue: true
+  allow_remember: true
+  status_filter: open,in_progress,blocked,deferred,closed
+  before_edit_commands:
+    - bd prime || true
+    - bd list --status open,in_progress,blocked,deferred,closed || true
+  remember_guidance:
+    - Use bd remember for durable architecture decisions.
+```
+
+AIWK injects concise Beads discipline and the operator-provided `beadsSnapshot` into prompts. It does not provide a Beads API wrapper or automatically manage issue lifecycle. With Beads disabled, `beadsSnapshot` remains available as optional operator context but no `bd` commands are required.
+
+## Documentation
+
+- [User guide](docs/user-guide.md): installation, setup, daily operation, recovery, and command details.
+- [Workflow reference](docs/workflow-reference.md): complete supported `workflow.yaml` schema and examples.
+- [Architecture](docs/architecture.md): execution model, trust boundaries, generated control flow, and evidence model.
+- [Runtime validation](testing_infra/aiwk_claude_runtime_validation_instructions.md): disposable end-to-end Claude Workflow validation.
+
+Historical implementation prompts remain under `docs/`; they describe development phases, not the current user interface.
+
+## Important limitations
+
+- AIWK’s dependency-free YAML reader supports the generated mapping/list/scalar subset, not anchors, tags, inline collections, or multiline scalar syntax.
+- Rendering snapshots spec, invariant, and gate file contents into the generated JS; rerender after edits.
+- Objective gate commands are trusted shell snippets.
+- Beads support is guidance/configuration, not automation.
+- Claude Workflow runtime execution is external to this CLI.
+- `ignored_scratch_dirs` and `test_commands` are preserved in `aiwk.yaml` for project configuration but are not currently applied by the renderer or gate runner.
+
+## Development
+
+Run the test suite:
+
+```bash
+cd ~/dev/aiwk
+.venv/bin/python -m pytest -q
+```
+
+Syntax-check generated JavaScript with Node where available:
+
+```bash
+node --check path/to/generated/workflow.js
+```

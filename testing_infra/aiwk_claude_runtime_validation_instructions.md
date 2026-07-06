@@ -1,30 +1,77 @@
-# AIWK Claude Runtime Validation
+# Claude Workflow Runtime Validation
 
-Goal: prove that the mature AIWK-generated Claude Workflow JS is accepted by the actual Claude Workflow runtime, not just by `node --check` and pytest.
+This procedure validates AIWK’s generated JavaScript against the actual Claude Workflow runtime using an isolated toy repository. It is the final integration check beyond Python tests and `node --check`.
 
-This validation uses a disposable toy repo so the workflow can safely run Scope, Dev, Red Team, Review, and Commit phases without touching production code.
+It exercises:
 
-## 1. Copy and run the setup script
+- generated-script runtime compatibility;
+- `onlyStep` selection;
+- Scope, Developer, Red Team, Objective Gate, Reviewer, and Commit routing;
+- deterministic `gate-run` evidence;
+- mechanical-all commit behavior;
+- final clean-tree enforcement.
 
-Save `aiwk_runtime_validation_setup.sh` locally, then run:
+It must not be pointed at a production repository.
+
+## 1. Prerequisites
+
+Install AIWK in its virtual environment:
 
 ```bash
-bash aiwk_runtime_validation_setup.sh
+cd ~/dev/aiwk
+.venv/bin/python -m pip install -e .
+.venv/bin/aiwk --help
+```
+
+The setup script refuses to overwrite an existing target or AIWK project. If an earlier disposable validation exists, inspect anything you want to retain and remove it explicitly:
+
+```bash
+rm -rf ~/dev/aiwk_runtime_validation_target
+rm -rf ~/dev/.aiwk/aiwk_runtime_validation
+```
+These paths are disposable validation state; do not substitute production paths.
+
+## 2. Create a clean validation project
+
+```bash
+cd ~/dev/aiwk
+bash testing_infra/aiwk_runtime_validation_setup.sh
 ```
 
 The script creates:
 
 ```text
-~/dev/aiwk_runtime_validation_target        # disposable target git repo
-~/dev/.aiwk/aiwk_runtime_validation         # disposable AIWK project
+~/dev/aiwk_runtime_validation_target
+~/dev/.aiwk/aiwk_runtime_validation
 ~/dev/.aiwk/aiwk_runtime_validation/generated/aiwk_runtime_validation.claude_workflow.js
 ```
 
-It also renders the workflow, runs `aiwk preflight`, writes a handoff file, and runs `node --check` if Node is available.
+The target repository begins with a committed README and unittest. Python caches are excluded locally. The workflow project contains:
 
-## 2. Run the Claude Workflow runtime request
+- a deterministic objective gate with per-section timeouts;
+- a forbidden-marker count check;
+- `mechanical_all` commit policy;
+- a project spec and invariants limiting all edits to the disposable target;
+- preflight and operator handoff artifacts.
 
-Use the exact JSON printed by the setup script. It will look like:
+The setup script renders the workflow and prints the exact runtime request. If `node` is on `PATH`, it also checks JavaScript syntax.
+
+## 3. Inspect before launch
+
+```bash
+TARGET=~/dev/aiwk_runtime_validation_target
+PROJECT=~/dev/.aiwk/aiwk_runtime_validation
+
+git -C "$TARGET" status --short
+cat "$PROJECT/state/runtime_preflight.json"
+node --check "$PROJECT/generated/aiwk_runtime_validation.claude_workflow.js"
+```
+
+The target status should be empty. If Node is unavailable, skip only the syntax command; do not change the generated artifact manually.
+
+## 4. Run the Claude Workflow request
+
+Submit this shape to the Claude Workflow runtime:
 
 ```json
 {
@@ -39,69 +86,89 @@ Use the exact JSON printed by the setup script. It will look like:
 }
 ```
 
-Do not run this against a production workflow first. The validation should consume only the disposable target repo.
+AIWK does not launch this request itself.
 
-## 3. Expected Claude result
+## 5. Expected workflow behavior
+
+The run should:
+
+1. Select only `RUNTIME_SS0`.
+2. Scope a black-box marker-file test without implementation work.
+3. Create `runtime_marker.txt` containing exactly `AIWK_RUNTIME_VALIDATED\n`.
+4. Allow Red Team to add a durable adversarial test if useful.
+5. Run one generated `aiwk gate-run` command.
+6. Produce JSON evidence and a full gate log.
+7. Require both clean objective evidence and reviewer acceptance.
+8. Mechanically stage all accepted target changes and commit them.
+9. Require an empty post-commit `git status --short`.
+10. Return `reason: "all_steps_accepted"` with a per-step gate, review, and commit result.
+
+A structured halt is a valid diagnostic outcome but not a passing runtime validation. Inspect `halted_at`, `reason`, and the relevant role result.
+
+## 6. Verify after the run
+
+```bash
+TARGET=~/dev/aiwk_runtime_validation_target
+PROJECT=~/dev/.aiwk/aiwk_runtime_validation
+
+git -C "$TARGET" status --short
+git -C "$TARGET" log --oneline -5
+cat "$TARGET/runtime_marker.txt"
+
+find "$PROJECT/state/gates" -type f -name '*.json' -print | sort
+find "$PROJECT/logs/gates" -type f -name '*.log' -print | sort
+```
 
 Pass criteria:
 
-```text
-- Generated JS starts in Claude Workflow runtime without API/signature errors.
-- onlyStep=RUNTIME_SS0 is respected.
-- Scope, Dev, Red Team, Review, and Commit phases execute or cleanly halt with structured JSON.
-- Dev creates runtime_marker.txt in the disposable target repo.
-- Review accepts or explains a real issue.
-- Commit phase commits only target-repo files, or cleanly reports why it could not.
-```
+- target status is empty;
+- a new `RUNTIME_SS0` commit exists;
+- marker content is exact;
+- gate evidence reports `gate_clean:true`;
+- `build_rc`, `test_rc`, and `result_rc` are zero;
+- evidence and log SHA-256 values are present;
+- workflow result reason is `all_steps_accepted`.
 
-## 4. Local verification after Claude completes
-
-Run:
+Verify marker bytes with the AIWK environment:
 
 ```bash
-cd ~/dev/aiwk_runtime_validation_target
-
-git log --oneline -5
-git status --short
-cat runtime_marker.txt
-
-python - <<'PY'
+~/dev/aiwk/.venv/bin/python - <<'PY'
 from pathlib import Path
-p = Path('runtime_marker.txt')
-assert p.read_text(encoding='utf-8') == 'AIWK_RUNTIME_VALIDATED\n'
-print('marker content ok')
+p = Path.home() / "dev/aiwk_runtime_validation_target/runtime_marker.txt"
+assert p.read_bytes() == b"AIWK_RUNTIME_VALIDATED\n"
+print("marker bytes: ok")
 PY
 ```
 
-Optional if pytest is available:
+## 7. Interpreting failures
 
-```bash
-python -m pytest -q tests/test_runtime_marker.py
-```
+| Failure | Likely area |
+| --- | --- |
+| Script rejected before agents run | Generated JS/runtime compatibility. |
+| `unknown_onlyStep` | Runtime argument or workflow step mismatch. |
+| Scope/Dev/Red structured halt | Role prompt, implementation, or test issue. |
+| `objective_gate_failed_after_retries` | Inspect latest evidence JSON and full log. |
+| `review_rejected_after_retries` | Architecture/scope/reviewer findings remained unresolved. |
+| `commit_failed` | Git identity, commit command, or agent reporting failure. |
+| `commit_left_dirty_tree` | Commit result reports residual changes; inspect `status_after`. |
+| Gate command timeout (`rc:124`) | Command or configured timeout is unsuitable. |
 
-Also confirm production repos were not edited:
+The reviewer cannot override a red objective gate. The workflow also recomputes cleanliness instead of trusting the runner’s `gate_clean` field alone.
+
+## 8. Production-repository check
+
+After validation, confirm no production repository was touched:
 
 ```bash
 git -C ~/dev/t_robotics status --short
 git -C ~/dev/aiwk status --short
 ```
 
-`~/dev/aiwk` may show your intentional AIWK source changes. `~/dev/t_robotics` should not show new changes caused by this validation.
+The AIWK repository will show intentional source/documentation changes. Compare production status with its known baseline rather than assuming it was clean beforehand.
 
-## 5. Failure interpretation
-
-If it fails immediately with JS/runtime errors, the renderer still has a Claude runtime compatibility bug.
-
-If it starts but `agentOptions(...)` or schema passing fails, the generated call signature is wrong.
-
-If it runs phases but does not respect `onlyStep`, the workflow selection logic is wrong.
-
-If it reaches commit but leaves files uncommitted, inspect whether the commit prompt/script discipline is too strict or whether the agent refused to run shell commands.
-
-If it edits production repos, stop and fix the generated context/prompt boundaries before running any real workflow.
-
-## 6. Cleanup
+## 9. Cleanup
 
 ```bash
-rm -rf ~/dev/aiwk_runtime_validation_target ~/dev/.aiwk/aiwk_runtime_validation
+rm -rf ~/dev/aiwk_runtime_validation_target
+rm -rf ~/dev/.aiwk/aiwk_runtime_validation
 ```
