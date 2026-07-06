@@ -2,7 +2,7 @@
 
 > These prompts have been implemented and are retained as development history. They are not current usage instructions. Start with the repository [README](../../README.md), [user guide](../user-guide.md), and [workflow reference](../workflow-reference.md).
 
-This folder contains the Codex prompts that were used for the later AIWK passes:
+This folder contains theclaude prompts that were used for the later AIWK passes:
 
 1. `pass_4_0_commit_policy_simplification.md`
 2. `pass_4_1_final_clean_status_runtime_validation.md`

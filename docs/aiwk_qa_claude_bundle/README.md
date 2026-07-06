@@ -1,6 +1,6 @@
-# AIWK QA Codex Bundle
+# AIWK QAclaude Bundle
 
-This bundle contains a Codex prompt and shell scripts for testing AIWK locally without launching expensive Claude runtime workflows.
+This bundle contains aclaude prompt and shell scripts for testing AIWK locally without launching expensive Claude runtime workflows.
 
 For product usage rather than QA execution, see the repository [README](../../README.md), [user guide](../user-guide.md), and [architecture guide](../architecture.md).
 
@@ -20,15 +20,15 @@ scripts/06_post_runtime_verify.sh
 ## Recommended use
 
 1. Extract this zip.
-2. Give `codex_prompt_run_aiwk_qa.md` to Codex.
-3. Ask Codex to run:
+2. Give claude_prompt_run_aiwk_qa.md` toclaude.
+3. Askclaude to run:
 
 ```bash
 bash scripts/00_run_all_local_qa.sh
 ```
 
 4. If local QA passes, manually run the printed Claude Workflow runtime request.
-5. After the runtime canary finishes, ask Codex to run:
+5. After the runtime canary finishes, askclaude to run:
 
 ```bash
 bash scripts/06_post_runtime_verify.sh

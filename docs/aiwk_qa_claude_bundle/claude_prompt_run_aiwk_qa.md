@@ -1,4 +1,4 @@
-# Codex Prompt: Run AIWK Local QA Without Burning Claude Runtime Tokens
+#claude Prompt: Run AIWK Local QA Without Burning Claude Runtime Tokens
 
 You are working in the user's AIWK development environment.
 

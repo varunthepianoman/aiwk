@@ -1,6 +1,6 @@
-# Prompt for Codex: Upgrade AIWK Renderer with Phase Smoke Tests and Mature Workflow Semantics
+# Prompt forclaude: Upgrade AIWK Renderer with Phase Smoke Tests and Mature Workflow Semantics
 
-You are Codex developing AIWK itself.
+You areclaude developing AIWK itself.
 
 You are working in a 3-folder VS Code workspace:
 
@@ -332,7 +332,7 @@ The exact schema implementation can vary, but these control fields must exist so
 
 ---
 
-# Phase Plan for Codex
+# Phase Plan forclaude
 
 ## Phase 0 — Audit current renderer and add characterization tests
 
