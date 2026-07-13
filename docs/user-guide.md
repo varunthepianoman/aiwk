@@ -61,6 +61,8 @@ Initialization creates `~/dev/.aiwk/my_refactor/` and does not initialize, stage
 
 The generated `aiwk.yaml` identifies the target repository and workflow folder. The generated shell wrappers contain absolute paths to this config and pin the current Python interpreter.
 
+Initialization also creates `master_coordinator_prompt.md`, a generated launch runbook with exact project paths, commands, stage/step IDs, and context-collection instructions.
+
 ## 4. Edit the durable source of truth
 
 Before rendering, edit these files.
@@ -211,6 +213,8 @@ $AIWK render claude-workflow \
 
 Render validates references, phases, commands, timeouts, commit templates, and configuration types. It also embeds the current contents of project spec, invariants, and gates. Rerender whenever any durable input changes.
 
+Every render refreshes `master_coordinator_prompt.md`. Do not put unique requirements or decisions in that file; move them to `workflow.yaml` or the appropriate durable spec first.
+
 If Node is available, check syntax:
 
 ```bash
@@ -220,6 +224,14 @@ node --check ~/dev/.aiwk/my_refactor/generated/my_refactor.claude_workflow.js
 ## 9. Launch through Claude Workflow
 
 AIWK generates the script but does not itself launch Claude. Supply the generated script to your Claude Workflow runtime.
+
+The recommended entry point is the generated coordinator prompt:
+
+```text
+~/dev/.aiwk/my_refactor/master_coordinator_prompt.md
+```
+
+Give it to the coordinating operator/agent. It instructs the coordinator to rerender, run fresh preflight, verify prerequisite sections from durable evidence, create a prestart context pack, collect configured Beads output, construct concrete arguments, launch the workflow, and report structured halts. The generated workflow—not the coordinator—owns role sequencing.
 
 Supported runtime arguments:
 
@@ -252,6 +264,8 @@ For the standard phase list, AIWK runs:
 ```text
 Scope Writer
   ↓
+optional Discovery Agent
+  ↓
 Developer ⇄ Adversarial Red Team  (maximum 2 Dev/Red cycles)
   ↓
 Objective Build Gate
@@ -266,6 +280,53 @@ Final clean-status check
 ```
 
 The workflow halts with structured `halted_at`, `reason`, `stage`, and `results` fields when a role blocks, retries are exhausted, the gate remains red, commit fails, or the commit leaves a dirty tree.
+
+### Durable per-agent handoffs
+
+Every generated non-gate/non-commit role is told to write a concrete handoff file before it returns:
+
+```text
+state/handoffs/<STEP>_<ROLE>_C<CYCLE>_<AGENT_ID>.md
+```
+
+The role also returns `handoff_path`, `files_changed`, `files_inspected`, `tests_run`, `gate_evidence_paths`, `known_dirty_paths`, and `next_agent_should_read` in structured output. The workflow threads prior handoff paths into downstream prompts, so later agents start from durable summaries instead of rediscovering the whole repository from scratch.
+
+Use `handoffPath` in runtime args for an operator-created or previous-session handoff. Generated per-agent handoffs then accumulate inside the step result as `handoff_paths`.
+
+### Discovery agents
+
+Enable Discovery when a step crosses unfamiliar package boundaries, has many possible file targets, or would otherwise make Dev/Red Team/Review repeat broad search:
+
+```yaml
+discovery:
+  enabled: true
+  model: opus
+  effort: high
+```
+
+Or only for one step:
+
+```yaml
+steps:
+  - id: LARGE_SS1
+    discovery:
+      enabled: true
+```
+
+Discovery runs after Scope and before Developer. It should read supplied handoffs first, perform bounded repo discovery, write a compact repo-map handoff, and tell Developer what not to rediscover.
+
+### Context economy and checkpoints
+
+Configure soft checkpoint guidance:
+
+```yaml
+context_economy:
+  max_tool_calls_before_checkpoint: 30
+  checkpoint_after_major_test_milestone: true
+  require_handoff_before_checkpoint: true
+```
+
+Generated prompts tell long agents to redirect long command output to logs, return summaries/tails, and stop with `status:"checkpoint"` after a large discovery/debug/test milestone. The workflow surfaces that as `checkpoint_requested` with the handoff path and remaining work. Start a fresh continuation with `handoffPath` set to the checkpoint handoff.
 
 ## 11. Inspect objective evidence
 
@@ -324,6 +385,8 @@ state/DEV_TO_REVIEW_handoff.md
 
 Give the Markdown path to a resumed workflow through `handoffPath`. Source and committed specs remain authoritative if a handoff is stale or contradictory.
 
+Generated role handoffs are separate from `context-pack`: `context-pack` is operator-driven, while `state/handoffs/` files are role-by-role runtime artifacts.
+
 ## 13. Generated wrappers
 
 Each project includes:
@@ -347,6 +410,16 @@ Use `fromStep` so the workflow does not rerun prior steps:
 ```json
 {"stage":"build","fromStep":"GENERIC_SS1","handoffPath":"..."}
 ```
+
+### Continue after a checkpoint
+
+Use the `checkpoint.handoff_path` returned by the halted workflow:
+
+```json
+{"stage":"build","onlyStep":"GENERIC_SS1","handoffPath":"/home/me/dev/.aiwk/my_refactor/state/handoffs/GENERIC_SS1_DEV_C1_dev_1.md"}
+```
+
+The continuation agent should read that handoff first, verify targeted files second, and avoid broad rediscovery unless the handoff is stale, contradicted, or insufficient.
 
 ### Isolate one failing step
 

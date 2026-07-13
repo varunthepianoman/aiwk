@@ -13,7 +13,8 @@ Durable project inputs
   spec/gates.yaml
           │
           ├── aiwk render claude-workflow
-          │       └── generated/<project>.claude_workflow.js
+          │       ├── generated/<project>.claude_workflow.js
+          │       └── master_coordinator_prompt.md
           │
           ├── aiwk gate-run
           │       ├── state/gates/*.json
@@ -41,11 +42,14 @@ Durable author-edited inputs:
 Generated or operational artifacts:
 
 - Claude Workflow JavaScript;
+- master coordinator launch runbook;
 - objective gate evidence/logs;
 - preflight logs;
 - context packs and handoffs.
 
 Never make durable workflow changes only in generated JS. The next render will replace them.
+
+The same rule applies to `master_coordinator_prompt.md`. It is a thin launch/control-plane artifact: exact paths, fresh-context commands, runtime argument construction, halt policy, and completion checks. It references durable requirements rather than copying them, and every render replaces it.
 
 ## Render-time snapshot
 
@@ -77,6 +81,8 @@ The normal control flow is:
 ```text
 Scope
   │ blocked / needs decision → halt
+  ▼
+Discovery (optional)
   ▼
 Developer ─────┐
   ▼            │ failures
@@ -164,7 +170,15 @@ This keeps workflows usable without Beads and avoids coupling the core tool to a
 
 ## Context and handoff boundary
 
-`context-pack` is operator-driven. Generated JS points agents toward `handoffPath` but does not run context generation itself.
+`context-pack` is operator-driven. Generated JS points agents toward operator-supplied `handoffPath` but does not run context generation itself.
+
+Generated non-gate/non-commit agents also write per-agent handoffs below:
+
+```text
+state/handoffs/<STEP>_<ROLE>_C<CYCLE>_<AGENT_ID>.md
+```
+
+The workflow tracks returned `handoff_path` values and injects them into downstream prompts. This is a prompt/runtime coordination mechanism, not a database: generated JS enforces that structured output contains a handoff path, but it does not independently verify file contents.
 
 Context packs intentionally prefer summaries and pointers over full data:
 
@@ -172,6 +186,10 @@ Context packs intentionally prefer summaries and pointers over full data:
 - gate logs remain separate files;
 - Beads snapshots are included only when supplied;
 - source and committed specs override stale handoff text.
+
+Discovery agents are optional. They centralize broad repository mapping before Developer so later agents can use targeted verification instead of repeated global sweeps.
+
+Checkpoint/continuation support is prompt-level. Since generated JS cannot reliably observe provider-internal tool-call counts, long agents are instructed to write a handoff and return `status:"checkpoint"`; generated routing surfaces a structured `checkpoint_requested` halt for an operator to continue with fresh context.
 
 ## Safety model
 
@@ -193,4 +211,3 @@ The current design keeps future work localized:
 - add provider renderers under `aiwk/renderers/`;
 - extend workflow dataclasses and validation in `workflow_spec.py`;
 - extend deterministic operations as CLI modules rather than embedding shell execution in provider JS.
-

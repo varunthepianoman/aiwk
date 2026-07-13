@@ -1,0 +1,65 @@
+project: complex_discovery_example
+description: Larger step with Discovery, context economy, objective gate, and mechanical_all commit.
+default_stage: build
+
+discovery:
+  enabled: true
+  model: opus
+  effort: high
+
+context_economy:
+  max_tool_calls_before_checkpoint: 30
+  checkpoint_after_major_test_milestone: true
+  require_handoff_before_checkpoint: true
+
+commit:
+  mode: mechanical_all
+  message_template: "{step_id}: {step_title}"
+  agent:
+    model: sonnet
+    effort: low
+
+objective_gates:
+  default:
+    enabled: true
+    description: Fast deterministic checks.
+    setup:
+      commands:
+        - python --version
+    build:
+      commands:
+        - python -m py_compile src/example.py
+    test:
+      commands:
+        - python -m unittest discover -s tests
+    result:
+      commands:
+        - "true"
+    checks:
+      - name: no_forbidden_marker
+        command: 'grep -R "FORBIDDEN_MARKER" src tests'
+        max_count: 0
+        counting_instructions: Count matching output lines; grep rc 1 with no output means count 0.
+
+stages:
+  build:
+    description: Complex implementation with repo-map handoff.
+    steps:
+      - id: COMPLEX_SS0
+        title: Implement a cross-package change
+        model: sonnet
+        effort: medium
+        objective_gate: default
+        phases:
+          - scope
+          - discovery
+          - dev
+          - redteam
+          - review
+          - commit
+        prompt:
+          scope: Define black-box tests and non-goals for this substep.
+          discovery: Map likely files, symbols, tests, package boundaries, and what Developer should not rediscover.
+          dev: Implement the scoped change using the Discovery handoff as the broad map.
+          redteam: Challenge the diff and new tests with adversarial white-box cases.
+          review: Review against scope, invariants, objective gate evidence, and dirty-tree safety.

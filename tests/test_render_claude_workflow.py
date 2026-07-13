@@ -70,6 +70,27 @@ class ClaudeWorkflowRenderTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def enable_discovery_and_context_economy(self):
+        workflow_path = self.project_root / "workflow.yaml"
+        block = '''discovery:
+  enabled: true
+  model: opus
+  effort: high
+
+context_economy:
+  max_tool_calls_before_checkpoint: 25
+  checkpoint_after_major_test_milestone: true
+  require_handoff_before_checkpoint: true
+
+'''
+        text = workflow_path.read_text(encoding="utf-8").replace("stages:\n", block + "stages:\n", 1)
+        text = text.replace(
+            "          scope: TODO write black-box tests/spec checks.\n",
+            "          scope: TODO write black-box tests/spec checks.\n          discovery: TODO map relevant files and symbols.\n",
+            1,
+        )
+        workflow_path.write_text(text, encoding="utf-8")
+
     def test_default_render(self):
         result = render(self.config_path)
         output = self.project_root / "generated" / "demo.claude_workflow.js"
@@ -98,14 +119,45 @@ class ClaudeWorkflowRenderTests(unittest.TestCase):
         output = Path(render(self.config_path)["output_path"])
         text = output.read_text(encoding="utf-8")
         for expected in (
-            "SCOPE_SCHEMA", "IMPL_SCHEMA", "RED_SCHEMA", "REVIEW_SCHEMA",
+            "SCOPE_SCHEMA", "DISCOVERY_SCHEMA", "IMPL_SCHEMA", "RED_SCHEMA", "REVIEW_SCHEMA",
             "agentOptions",
             "The Red Team found these failures",
             "Address exactly these Code Reviewer findings", "schema:",
+            "handoff_path", "files_inspected", "tests_run", "known_dirty_paths",
+            "state/handoffs", "handoffPathFor", "Handoff: ${step.id}",
+            "Prior handoff paths:", "Latest gate evidence/log paths:",
         ):
             with self.subTest(marker=expected):
                 self.assertIn(expected, text)
         self.assertNotIn("await agent({", text)
+
+    def test_rendered_schemas_have_no_duplicate_required_items(self):
+        """The runtime rejects a JSON Schema whose ``required`` array has
+        duplicate items. Every rendered schema (after resolving the shared
+        ``...HANDOFF_REQUIRED`` spread) must list each field at most once."""
+        import re
+
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+
+        handoff_block = re.search(
+            r"const HANDOFF_REQUIRED = \[(.*?)\];", text, re.DOTALL
+        )
+        self.assertIsNotNone(handoff_block, "HANDOFF_REQUIRED constant not found")
+        handoff_fields = re.findall(r'"([^"]+)"', handoff_block.group(1))
+        self.assertIn("files_changed", handoff_fields)
+
+        # Every literal `required: [ ... ]` array in the rendered script.
+        for match in re.finditer(r"required:\s*\[(.*?)\]", text, re.DOTALL):
+            body = match.group(1)
+            fields = re.findall(r'"([^"]+)"', body)
+            if "...HANDOFF_REQUIRED" in body:
+                fields = fields + handoff_fields
+            with self.subTest(required=body.strip()[:60]):
+                self.assertEqual(
+                    len(fields), len(set(fields)),
+                    f"duplicate required item(s): "
+                    f"{[f for f in fields if fields.count(f) > 1]}",
+                )
 
     def test_rendered_workflow_is_runtime_compatible(self):
         """Generated JS must match the Claude Workflow runtime contract.
@@ -216,9 +268,53 @@ class ClaudeWorkflowRenderTests(unittest.TestCase):
             "git commit -m", "git rev-parse HEAD", 'model: commitPolicy.model',
             'effort: commitPolicy.effort', "commit_rc", "clean_after",
             "commit_left_dirty_tree", "commit_failed", "status_after", "commitResult",
+            "Do not selectively stage", "If status_after is not empty",
+            "Gate/review must confirm that git add -A is safe",
         ):
             self.assertIn(marker, text)
         self.assertNotIn("NEVER use git add -A", text)
+
+    def test_handoff_propagation_and_checkpoint_policy_render(self):
+        output = Path(render(self.config_path)["output_path"])
+        text = output.read_text(encoding="utf-8")
+        for marker in (
+            "const HANDOFF_REQUIRED",
+            "Durable handoff requirement:",
+            "Write this exact handoff markdown file",
+            "state/handoffs",
+            "rememberHandoff(handoffState, scope)",
+            "rememberHandoff(handoffState, impl)",
+            "rememberHandoff(handoffState, red)",
+            "rememberGateEvidence(handoffState, gate)",
+            "buildReviewerPrompt(step, gate, gateClean, handoffState)",
+            "checkpoint_requested",
+            'status: "checkpoint"',
+            "Context economy rule:",
+            "Broad grep/find/read sweeps are allowed only if the handoff is missing",
+            "tail -80",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_discovery_enabled_renders_discovery_between_scope_and_dev(self):
+        self.enable_discovery_and_context_economy()
+        output = Path(render(self.config_path)["output_path"])
+        text = output.read_text(encoding="utf-8")
+        for marker in (
+            '"discovery": {',
+            '"enabled": true',
+            "=== DISCOVERY AGENT:",
+            "DISCOVERY_SCHEMA",
+            "Discovery did the broad map for this step",
+            "Target the files/symbols named in the Discovery handoff",
+            "Tell Developer what NOT to rediscover",
+            "max_tool_calls_before_checkpoint",
+            "about ${CONTEXT_ECONOMY.max_tool_calls_before_checkpoint} tool calls",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+        self.assertLess(text.index("SCOPING TEST WRITER"), text.index("DISCOVERY AGENT"))
+        self.assertLess(text.index("DISCOVERY AGENT"), text.index("DEVELOPER:"))
 
     def test_commit_mode_none_is_structured_skip(self):
         workflow = self.project_root / "workflow.yaml"

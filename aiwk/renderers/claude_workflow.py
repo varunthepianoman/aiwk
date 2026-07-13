@@ -36,6 +36,7 @@ def render_claude_workflow(
         "invariantsPath": project_root / "spec" / "invariants.yaml",
         "gatesPath": project_root / "spec" / "gates.yaml",
         "statePath": project_root / "state",
+        "handoffsPath": project_root / "state" / "handoffs",
     }
     static_context = {
         "project": config.project,
@@ -77,6 +78,13 @@ def render_claude_workflow(
             "effort": policy.effort,
         }
 
+    def rendered_discovery(step) -> dict[str, object]:
+        return {
+            "enabled": step.discovery.enabled,
+            "model": step.discovery.model,
+            "effort": step.discovery.effort,
+        }
+
     stages = {
         name: {
             "description": stage.description,
@@ -90,6 +98,7 @@ def render_claude_workflow(
                     "prompt": step.prompt,
                     "objectiveGate": rendered_gate(step.objective_gate),
                     "commitPolicy": rendered_commit(step),
+                    "discovery": rendered_discovery(step),
                     "stage": name,
                 }
                 for step in stage.steps
@@ -149,6 +158,7 @@ export const meta = __META__;
 const STATIC_CONTEXT = __STATIC_CONTEXT__;
 const DURABLE_CONTEXT = __DURABLE_CONTEXT__;
 const BEADS_CONFIG = __BEADS_CONFIG__;
+const CONTEXT_ECONOMY = __CONTEXT_ECONOMY__;
 const ALL_STEPS = __STAGES__;
 const MAX_DEV_RED_CYCLES = 2;
 const MAX_REVIEW_ATTEMPTS = 2;
@@ -183,27 +193,78 @@ function agentOptions(options) {
   return opts;
 }
 
+const HANDOFF_REQUIRED = [
+  "handoff_path", "files_changed", "files_inspected", "tests_run",
+  "gate_evidence_paths", "known_dirty_paths", "next_agent_should_read",
+];
+
+const HANDOFF_PROPERTIES = {
+  handoff_path: { type: "string" },
+  files_changed: { type: "array", items: { type: "string" } },
+  files_inspected: { type: "array", items: { type: "string" } },
+  tests_run: {
+    type: "array",
+    items: {
+      type: "object", additionalProperties: false,
+      required: ["command", "rc", "result", "evidence_path"],
+      properties: {
+        command: { type: "string" },
+        rc: { type: ["integer", "null"] },
+        result: { type: "string" },
+        evidence_path: { type: "string" },
+      },
+    },
+  },
+  gate_evidence_paths: { type: "array", items: { type: "string" } },
+  known_dirty_paths: { type: "array", items: { type: "string" } },
+  next_agent_should_read: { type: "array", items: { type: "string" } },
+};
+
+const DISCOVERY_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["status", "summary", "repo_map", "likely_files", "likely_tests", "do_not_rediscover", "handoff", "notes", ...HANDOFF_REQUIRED],
+  properties: {
+    status: { type: "string", enum: ["done", "blocked", "needs_decision", "checkpoint"] },
+    summary: { type: "string" },
+    repo_map: { type: "string" },
+    likely_files: { type: "array", items: { type: "string" } },
+    likely_tests: { type: "array", items: { type: "string" } },
+    do_not_rediscover: { type: "array", items: { type: "string" } },
+    handoff: { type: "string" },
+    notes: { type: "string" },
+    reason: { type: "string" },
+    remaining_work: { type: "array", items: { type: "string" } },
+    continue_role: { type: "string" },
+    continue_step: { type: "string" },
+    ...HANDOFF_PROPERTIES,
+  },
+};
+
 const SCOPE_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["status", "summary", "test_files_written", "scope_ok", "beads_notes", "handoff", "notes"],
+  required: ["status", "summary", "test_files_written", "scope_ok", "beads_notes", "handoff", "notes", ...HANDOFF_REQUIRED],
   properties: {
-    status: { type: "string", enum: ["done", "blocked", "needs_decision"] },
+    status: { type: "string", enum: ["done", "blocked", "needs_decision", "checkpoint"] },
     summary: { type: "string" },
     test_files_written: { type: "array", items: { type: "string" } },
     scope_ok: { type: "boolean" },
     beads_notes: { type: "string" },
     handoff: { type: "string" },
     notes: { type: "string" },
+    reason: { type: "string" },
+    remaining_work: { type: "array", items: { type: "string" } },
+    continue_role: { type: "string" },
+    continue_step: { type: "string" },
+    ...HANDOFF_PROPERTIES,
   },
 };
 
 const IMPL_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["status", "summary", "files_changed", "tests_added", "scope_ok", "self_build_passed", "beads_issues_opened", "beads_issues_closed", "beads_memory_written", "handoff", "notes"],
+  required: ["status", "summary", "tests_added", "scope_ok", "self_build_passed", "beads_issues_opened", "beads_issues_closed", "beads_memory_written", "handoff", "notes", ...HANDOFF_REQUIRED],
   properties: {
-    status: { type: "string", enum: ["done", "blocked", "scope_violation", "needs_decision", "invalid_test"] },
+    status: { type: "string", enum: ["done", "blocked", "scope_violation", "needs_decision", "invalid_test", "checkpoint"] },
     summary: { type: "string" },
-    files_changed: { type: "array", items: { type: "string" } },
     tests_added: { type: "array", items: { type: "string" } },
     scope_ok: { type: "boolean" },
     self_build_passed: { type: ["boolean", "null"] },
@@ -212,14 +273,19 @@ const IMPL_SCHEMA = {
     beads_memory_written: { type: ["boolean", "null"] },
     handoff: { type: "string" },
     notes: { type: "string" },
+    reason: { type: "string" },
+    remaining_work: { type: "array", items: { type: "string" } },
+    continue_role: { type: "string" },
+    continue_step: { type: "string" },
+    ...HANDOFF_PROPERTIES,
   },
 };
 
 const RED_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["status", "summary", "adversarial_tests_written", "tests_passed", "failures_found", "beads_notes", "handoff", "notes"],
+  required: ["status", "summary", "adversarial_tests_written", "tests_passed", "failures_found", "beads_notes", "handoff", "notes", ...HANDOFF_REQUIRED],
   properties: {
-    status: { type: "string", enum: ["all_passed", "failures_found", "blocked", "needs_decision"] },
+    status: { type: "string", enum: ["all_passed", "failures_found", "blocked", "needs_decision", "checkpoint"] },
     summary: { type: "string" },
     adversarial_tests_written: { type: "array", items: { type: "string" } },
     tests_passed: { type: "boolean" },
@@ -227,13 +293,19 @@ const RED_SCHEMA = {
     beads_notes: { type: "string" },
     handoff: { type: "string" },
     notes: { type: "string" },
+    reason: { type: "string" },
+    remaining_work: { type: "array", items: { type: "string" } },
+    continue_role: { type: "string" },
+    continue_step: { type: "string" },
+    ...HANDOFF_PROPERTIES,
   },
 };
 
 const REVIEW_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["accepted", "build_passed", "gtests_passed", "scope_clean", "findings", "beads_notes", "verdict_reason", "handoff"],
+  required: ["accepted", "build_passed", "gtests_passed", "scope_clean", "findings", "beads_notes", "verdict_reason", "handoff", ...HANDOFF_REQUIRED],
   properties: {
+    status: { type: "string", enum: ["done", "blocked", "needs_decision", "checkpoint"] },
     accepted: { type: "boolean" },
     build_passed: { type: "boolean" },
     gtests_passed: { type: "boolean" },
@@ -242,6 +314,11 @@ const REVIEW_SCHEMA = {
     beads_notes: { type: "string" },
     verdict_reason: { type: "string" },
     handoff: { type: "string" },
+    reason: { type: "string" },
+    remaining_work: { type: "array", items: { type: "string" } },
+    continue_role: { type: "string" },
+    continue_step: { type: "string" },
+    ...HANDOFF_PROPERTIES,
   },
 };
 
@@ -316,6 +393,7 @@ Project spec path: ${STATIC_CONTEXT.projectSpecPath}
 Invariants path: ${STATIC_CONTEXT.invariantsPath}
 Gates path: ${STATIC_CONTEXT.gatesPath}
 State/handoff directory: ${STATIC_CONTEXT.statePath}
+Durable per-agent handoffs directory: ${STATIC_CONTEXT.handoffsPath}
 
 === PROJECT SPEC (spec/project.spec.md) ===
 ${DURABLE_CONTEXT.projectSpec}
@@ -329,6 +407,168 @@ ${DURABLE_CONTEXT.gates}`;
 __BEADS_CONTEXT_JS__
 
 __BEADS_ROLE_JS__
+
+function uniqueNonEmpty(values) {
+  const result = [];
+  const seen = new Set();
+  for (const value of values || []) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    result.push(text);
+  }
+  return result;
+}
+
+function sanitizePathComponent(value) {
+  const safe = String(value || "unknown").replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+  return safe || "unknown";
+}
+
+function handoffPathFor(step, role, cycle, agentId) {
+  const filename = `${sanitizePathComponent(step.id)}_${sanitizePathComponent(role).toUpperCase()}_C${Number(cycle || 0)}_${sanitizePathComponent(agentId)}.md`;
+  return `${STATIC_CONTEXT.handoffsPath}/${filename}`;
+}
+
+function handoffTemplateText(step, role, cycle) {
+  return `# Handoff: ${step.id} ${role} cycle ${cycle}
+
+## Verdict
+- status:
+- short verdict:
+
+## Scope
+- allowed scope executed:
+- explicitly avoided non-goals:
+
+## Files changed / inspected
+### Changed
+- <path> — <why>
+
+### Inspected but not changed
+- <path> — <why>
+
+## Tests / gates run
+- command:
+- rc:
+- result:
+- evidence path:
+
+## Findings closed
+- <finding id/name> — <resolution>
+
+## Remaining findings / risks
+- <severity> <description> <recommended next action>
+
+## Exact accepted paths / dirty tree
+- changed paths:
+- known dirty paths:
+- must be clean after commit:
+
+## Next agent instructions
+- read this first;
+- do not rediscover:
+- focus on:
+- rerun only if:`;
+}
+
+function contextEconomyPolicy(role) {
+  return `Context economy rule:
+- Read supplied handoff(s) first.
+- Do not redo broad repository discovery already summarized there.
+- Use targeted reads of named files/symbols for grounding before edits/review.
+- Broad grep/find/read sweeps are allowed only if the handoff is missing, stale, contradicted, or insufficient; state the reason.
+- Batch shell discovery when possible.
+- Redirect long test/build output to logs and print summaries/tails.
+- For long commands use this pattern:
+  <long command> > /tmp/${STATIC_CONTEXT.project}_${role}.log 2>&1
+  rc=$?
+  echo "rc=$rc"
+  tail -80 /tmp/${STATIC_CONTEXT.project}_${role}.log
+- If you approach about ${CONTEXT_ECONOMY.max_tool_calls_before_checkpoint} tool calls${CONTEXT_ECONOMY.checkpoint_after_major_test_milestone ? " or complete a major compile/test milestone" : ""}, write the durable handoff and return status:\"checkpoint\" with remaining_work, continue_role, and continue_step instead of growing one huge transcript.
+- ${CONTEXT_ECONOMY.require_handoff_before_checkpoint ? "A checkpoint is invalid without a written handoff_path." : "Prefer a written handoff_path before checkpointing."}`;
+}
+
+function priorContextBlock(priorHandoffPaths, gateEvidencePaths) {
+  const handoffs = uniqueNonEmpty(priorHandoffPaths);
+  const gates = uniqueNonEmpty(gateEvidencePaths);
+  const handoffLines = handoffs.length ? handoffs.map((path) => `- ${path}`).join("\n") : "- (none yet)";
+  const gateLines = gates.length ? gates.map((path) => `- ${path}`).join("\n") : "- (none yet)";
+  return `Prior handoff paths:
+${handoffLines}
+
+Latest gate evidence/log paths:
+${gateLines}
+
+Read these first. Do not repeat broad repository discovery already summarized there unless the handoff is missing, stale, contradicted by source, or insufficient for the local task.
+If a handoff is contradicted by source, objective gate evidence, or committed specs, source/gates/specs win and you must explain the contradiction.`;
+}
+
+function handoffInstructions(step, role, cycle, agentId) {
+  const path = handoffPathFor(step, role, cycle, agentId);
+  return `Durable handoff requirement:
+- Before returning, create the directory ${STATIC_CONTEXT.handoffsPath}.
+- Write this exact handoff markdown file: ${path}
+- Use this template and fill it concretely:
+
+${handoffTemplateText(step, role, cycle)}
+
+- Return handoff_path exactly as: ${path}
+- Also return files_changed, files_inspected, tests_run, gate_evidence_paths, known_dirty_paths, and next_agent_should_read.
+- If you cannot write the handoff file, return a blocked/incomplete status and explain why.`;
+}
+
+function collectHandoffPaths(output) {
+  if (!output) return [];
+  return uniqueNonEmpty([
+    output.handoff_path,
+    ...(Array.isArray(output.next_agent_should_read) ? output.next_agent_should_read : []),
+  ]);
+}
+
+function collectGatePaths(gate) {
+  if (!gate) return [];
+  return uniqueNonEmpty([gate.evidence_path, gate.log_path]);
+}
+
+function rememberHandoff(state, output) {
+  state.priorHandoffPaths = uniqueNonEmpty([
+    ...(state.priorHandoffPaths || []),
+    ...collectHandoffPaths(output),
+  ]);
+}
+
+function rememberGateEvidence(state, gate) {
+  state.gateEvidencePaths = uniqueNonEmpty([
+    ...(state.gateEvidencePaths || []),
+    ...collectGatePaths(gate),
+  ]);
+}
+
+function isCheckpoint(output) {
+  return output && output.status === "checkpoint";
+}
+
+function checkpointReturn(step, role, output, stage, results) {
+  return {
+    halted_at: `${step.id}:${role}_checkpoint`,
+    reason: "checkpoint_requested",
+    checkpoint: {
+      status: "checkpoint",
+      handoff_path: output?.handoff_path || "",
+      reason: output?.reason || "unspecified",
+      remaining_work: output?.remaining_work || [],
+      continue_role: output?.continue_role || role,
+      continue_step: output?.continue_step || step.id,
+    },
+    stage,
+    results,
+  };
+}
+
+function missingHandoffReturn(step, role, stage, results) {
+  return { halted_at: `${step.id}:${role}`, reason: "missing_handoff_path", stage, results };
+}
 
 function withBeadsContext(prompt, runtime) {
   return `${CONTEXT}
@@ -436,7 +676,7 @@ function computeGateClean(gate, gateConfig = null) {
          configuredChecksClean;
 }
 
-function buildReviewerPrompt(step, gate, gateClean) {
+function buildReviewerPrompt(step, gate, gateClean, state) {
   return `=== Code Reviewer: ${step.id} — ${step.title} ===
 You are an adversarial Code Reviewer.
 A separate Objective Build Gate runs deterministic build/test/check commands.
@@ -451,6 +691,12 @@ ${beadsRoleGuidance("review")}
 Important review/commit ordering:
 This review runs before the Commit phase. Expected in-scope changes may be modified or untracked at review time. Do not reject solely because expected in-scope files are modified or untracked. Reject unrelated dirty files, generated workflow artifacts, logs, build outputs, transcripts, or scope creep. The Commit phase is responsible for explicit-path staging and final clean status.
 If commit mode is mechanical_all, the Commit phase will run git add -A, so reject unrelated dirty files before accepting.
+Gate/review must confirm that git add -A is safe because the tree contains only accepted in-scope changes.
+
+${contextEconomyPolicy("review")}
+${priorContextBlock(state.priorHandoffPaths, state.gateEvidencePaths)}
+Review from the current diff, prior handoffs, and gate evidence. Use targeted verification. Only rediscover broadly when necessary.
+${handoffInstructions(step, "REVIEW", 0, "review")}
 
 Objective gate clean: ${gateClean}
 ${formatGateResult(gate)}
@@ -487,6 +733,9 @@ head_after=$(git rev-parse HEAD)
 printf 'commit_rc=%s\\nstatus_before=%s\\nstatus_after=%s\\nhead_after=%s\\n' "$commit_rc" "$status_before" "$status_after" "$head_after"
 
 Do not inspect architecture. Do not review code. Do not edit files. Do not choose paths.
+Do not selectively stage. Do not rewrite the commit message creatively.
+Do not commit if review or objective gate acceptance failed; if you are invoked after a failed review/gate, report failed.
+If status_after is not empty, fail loudly and set clean_after:false.
 If git commit says nothing to commit, report that exactly.
 ${beadsRoleGuidance("commit")}
 Return the final status and commit hash if a commit was created.`;
@@ -521,7 +770,11 @@ async function runWorkflow(rawArgs) {
   catch (error) { return { halted_at: "selection", reason: error.message, stage: STAGE, results }; }
 
   for (const step of steps) {
-    const stepResult = { step: step.id, scope: null, dev_cycles: [], review_attempts: [], impl: null, gate: null, gate_clean: true, review: null, commit: null };
+    const handoffState = {
+      priorHandoffPaths: uniqueNonEmpty([runtime.HANDOFF_PATH]),
+      gateEvidencePaths: [],
+    };
+    const stepResult = { step: step.id, scope: null, discovery: null, dev_cycles: [], review_attempts: [], impl: null, gate: null, gate_clean: true, review: null, commit: null };
     results.push(stepResult);
 
     if (step.phases.includes("scope")) {
@@ -530,12 +783,44 @@ async function runWorkflow(rawArgs) {
 Write BLACK BOX tests/spec artifacts ONLY. No implementation code.
 Strictly follow the step scope.
 ${beadsRoleGuidance("scope")}
+${contextEconomyPolicy("scope")}
+${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
+${handoffInstructions(step, "SCOPE", 0, "scope")}
+
 ${step.prompt.scope}`, runtime),
         agentOptions({ label: `${step.id} scope`, phase: step.id, model: step.model, effort: step.effort, schema: SCOPE_SCHEMA })
       );
       stepResult.scope = scope;
+      if (isCheckpoint(scope)) return checkpointReturn(step, "scope", scope, STAGE, results);
+      if (!scope?.handoff_path) return missingHandoffReturn(step, "scope", STAGE, results);
+      rememberHandoff(handoffState, scope);
       if (!scope || scope.status !== "done" || scope.scope_ok !== true) {
         return { halted_at: `${step.id}:scope`, reason: scope?.status || "scope_rejected", stage: STAGE, results };
+      }
+    }
+
+    const discoveryEnabled = !!(step.discovery && step.discovery.enabled) || step.phases.includes("discovery");
+    if (discoveryEnabled) {
+      const discovery = await agent(
+        withBeadsContext(`=== DISCOVERY AGENT: ${step.id} — ${step.title} ===
+You are the Discovery agent. Perform broad but bounded repository/source discovery for this step.
+Do not edit production code unless the workflow phase explicitly asks for edits. Your output is a compact repo map handoff for Developer.
+Identify exact files, symbols, tests, command entrypoints, and risks likely relevant to this step.
+Tell Developer what NOT to rediscover.
+${contextEconomyPolicy("discovery")}
+${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
+${handoffInstructions(step, "DISCOVERY", 0, "discovery")}
+
+Discovery task from workflow.yaml:
+${step.prompt.discovery || "Create a compact repo map for this step. Identify likely files/symbols/tests and boundaries; do not implement."}`, runtime),
+        agentOptions({ label: `${step.id} discovery`, phase: step.id, model: step.discovery?.model || step.model, effort: step.discovery?.effort || "high", schema: DISCOVERY_SCHEMA })
+      );
+      stepResult.discovery = discovery;
+      if (isCheckpoint(discovery)) return checkpointReturn(step, "discovery", discovery, STAGE, results);
+      if (!discovery?.handoff_path) return missingHandoffReturn(step, "discovery", STAGE, results);
+      rememberHandoff(handoffState, discovery);
+      if (!discovery || discovery.status !== "done") {
+        return { halted_at: `${step.id}:discovery`, reason: discovery?.status || "discovery_escalation", stage: STAGE, results };
       }
     }
 
@@ -552,11 +837,19 @@ Implement only this sub-step. Pass the Scoping Tests.
 Respect invariants and out-of-scope boundaries.
 If Red Team or Reviewer findings are supplied, address exactly those findings.
 ${beadsRoleGuidance("dev")}
+${contextEconomyPolicy("dev")}
+${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
+${stepResult.discovery?.handoff_path ? "Discovery did the broad map for this step. Target the files/symbols named in the Discovery handoff and avoid global rediscovery by default. You may verify source locally before edits." : "No Discovery handoff exists for this step; keep discovery proportional and explain any broad grep/read sweeps."}
+${handoffInstructions(step, "DEV", cycle, `dev_${cycle}`)}
+
 ${step.prompt.dev}${redFindings ? `\n\nThe Red Team found these failures:\n${redFindings}` : ""}`, runtime),
           agentOptions({ label: `${step.id} dev ${cycle}`, phase: step.id, model: step.model, effort: step.effort, schema: IMPL_SCHEMA })
         );
         lastImpl = impl;
         stepResult.impl = impl;
+        if (isCheckpoint(impl)) return checkpointReturn(step, "dev", impl, STAGE, results);
+        if (!impl?.handoff_path) return missingHandoffReturn(step, "dev", STAGE, results);
+        rememberHandoff(handoffState, impl);
         if (!impl || impl.status !== "done" || impl.scope_ok !== true) {
           stepResult.dev_cycles.push({ cycle, impl });
           return { halted_at: `${step.id}:dev`, reason: impl?.status || "implementer_escalation", stage: STAGE, results };
@@ -571,11 +864,19 @@ Write adversarial WHITE BOX tests/spec checks designed to break it.
 Run relevant deterministic tests. Do not silently patch implementation.
 Report failures in structured form.
 ${beadsRoleGuidance("redteam")}
+${contextEconomyPolicy("redteam")}
+${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
+Start from the current diff, Developer handoff, and targeted verification. Do not redo broad repo discovery unless necessary.
+${handoffInstructions(step, "REDTEAM", cycle, `redteam_${cycle}`)}
+
 ${step.prompt.redteam}`, runtime),
           agentOptions({ label: `${step.id} red team ${cycle}`, phase: step.id, model: step.model, effort: "high", schema: RED_SCHEMA })
         );
         stepResult.dev_cycles.push({ cycle, impl: lastImpl, red });
         redTestFiles.push(...(red?.adversarial_tests_written || []));
+        if (isCheckpoint(red)) return checkpointReturn(step, "redteam", red, STAGE, results);
+        if (!red?.handoff_path) return missingHandoffReturn(step, "redteam", STAGE, results);
+        rememberHandoff(handoffState, red);
         if (!red || red.status === "blocked" || red.status === "needs_decision") {
           return { halted_at: `${step.id}:redteam`, reason: red?.status || "red_team_escalation", stage: STAGE, results };
         }
@@ -604,12 +905,18 @@ Implement only this sub-step and respect all invariants and boundaries.
 Address exactly these Code Reviewer findings:
 The findings block may also contain Objective Build Gate failures. Address both sources exactly.
 ${priorReviewFindings}
+${contextEconomyPolicy("dev_fix")}
+${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
+${handoffInstructions(step, "DEVFIX", attempt, `dev_fix_${attempt}`)}
 
 ${step.prompt.dev}`, runtime),
           agentOptions({ label: `${step.id} dev fix ${attempt}`, phase: step.id, model: step.model, effort: step.effort, schema: IMPL_SCHEMA })
         );
         lastImpl = fixImpl;
         stepResult.impl = fixImpl;
+        if (isCheckpoint(fixImpl)) return checkpointReturn(step, "dev", fixImpl, STAGE, results);
+        if (!fixImpl?.handoff_path) return missingHandoffReturn(step, "dev_fix", STAGE, results);
+        rememberHandoff(handoffState, fixImpl);
         if (!fixImpl || fixImpl.status !== "done" || fixImpl.scope_ok !== true) {
           stepResult.review_attempts.push({ attempt, fix: fixImpl });
           return { halted_at: `${step.id}:review_fix`, reason: fixImpl?.status || "implementer_escalation", stage: STAGE, results };
@@ -622,13 +929,17 @@ ${step.prompt.dev}`, runtime),
       const gateClean = gateEnabled ? computeGateClean(gate, step.objectiveGate) : true;
       lastGate = gate;
       lastGateClean = gateClean;
+      rememberGateEvidence(handoffState, gate);
 
       let review = null;
       if (step.phases.includes("review")) {
         review = await agent(
-          withBeadsContext(buildReviewerPrompt(step, gate, gateClean), runtime),
+          withBeadsContext(buildReviewerPrompt(step, gate, gateClean, handoffState), runtime),
           agentOptions({ label: `${step.id} review ${attempt}`, phase: step.id, model: step.model, effort: "high", schema: REVIEW_SCHEMA })
         );
+        if (isCheckpoint(review)) return checkpointReturn(step, "review", review, STAGE, results);
+        if (!review?.handoff_path) return missingHandoffReturn(step, "review", STAGE, results);
+        rememberHandoff(handoffState, review);
         accepted = gateClean && reviewAccepted(review);
       } else {
         accepted = gateClean;
@@ -681,6 +992,8 @@ ${step.prompt.dev}`, runtime),
     stepResult.gate_clean = lastGateClean;
     stepResult.review = lastReview;
     stepResult.final_review = lastReview;
+    stepResult.handoff_paths = handoffState.priorHandoffPaths;
+    stepResult.gate_evidence_paths = handoffState.gateEvidencePaths;
   }
   return { halted_at: null, reason: "all_steps_accepted", stage: STAGE, results };
 }
@@ -698,6 +1011,7 @@ return result;
         "__STATIC_CONTEXT__": _json(static_context),
         "__DURABLE_CONTEXT__": _json(durable_context),
         "__BEADS_CONFIG__": _json(beads_config),
+        "__CONTEXT_ECONOMY__": _json(asdict(spec.context_economy)),
         "__BEADS_CONTEXT_JS__": beads_context_js,
         "__BEADS_ROLE_JS__": beads_role_js,
         "__STAGES__": _json(stages),

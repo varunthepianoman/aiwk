@@ -12,11 +12,20 @@ from .context_pack import create_context_pack
 from .git_utils import git_snapshot, relevant_dirty_files, run_git
 from .scripts import write_scripts
 from .templates import TEMPLATE_NAMES, get_template
+from .coordinator import write_coordinator_prompt
+from .workflow_spec import load_workflow_spec
 
 
 def initialize(project: str, repo: str, workflow_folder: str, template: str = "generic") -> dict[str, str]:
     root = project_folder(workflow_folder, project)
-    for directory in (root / "spec", root / "scripts", root / "state", root / "logs", root / "generated"):
+    for directory in (
+        root / "spec",
+        root / "scripts",
+        root / "state",
+        root / "state" / "handoffs",
+        root / "logs",
+        root / "generated",
+    ):
         directory.mkdir(parents=True, exist_ok=True)
     config_path = root / "aiwk.yaml"
     config = Config(project, repo, workflow_folder, str(root))
@@ -27,7 +36,17 @@ def initialize(project: str, repo: str, workflow_folder: str, template: str = "g
     (root / "spec" / "invariants.yaml").write_text(selected.invariants, encoding="utf-8")
     (root / "spec" / "gates.yaml").write_text(selected.gates, encoding="utf-8")
     write_scripts(root / "scripts", config_path)
-    return {"status": "initialized", "project_folder": str(root), "config_path": str(config_path), "template": template}
+    workflow_path = root / "workflow.yaml"
+    coordinator_path = write_coordinator_prompt(
+        config, config_path, workflow_path,
+        root / "generated" / f"{project}.claude_workflow.js",
+        load_workflow_spec(workflow_path),
+    )
+    return {
+        "status": "initialized", "project_folder": str(root),
+        "config_path": str(config_path), "template": template,
+        "coordinator_path": str(coordinator_path),
+    }
 
 
 def preflight(config: Config, config_path: Path) -> dict[str, object]:

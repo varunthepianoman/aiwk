@@ -1,0 +1,30 @@
+project: simple_example
+description: Minimal AIWK workflow without Discovery.
+default_stage: build
+
+commit:
+  mode: mechanical_all
+  message_template: "{step_id}: {step_title}"
+  agent:
+    model: sonnet
+    effort: low
+
+stages:
+  build:
+    description: One scoped change.
+    steps:
+      - id: SIMPLE_SS0
+        title: Implement one small change
+        model: sonnet
+        effort: medium
+        phases:
+          - scope
+          - dev
+          - redteam
+          - review
+          - commit
+        prompt:
+          scope: Write focused black-box checks for the requested behavior.
+          dev: Implement only the scoped behavior.
+          redteam: Challenge the implementation with targeted white-box checks.
+          review: Review scope discipline, quality, and deterministic evidence.

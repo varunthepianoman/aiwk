@@ -18,6 +18,8 @@ class WorkflowSpecTests(unittest.TestCase):
         self.assertEqual(spec.project, "demo")
         self.assertEqual(spec.default_stage, "build")
         self.assertEqual(spec.stages["build"].steps[0].phases[-1], "commit")
+        self.assertFalse(spec.discovery.enabled)
+        self.assertEqual(spec.context_economy.max_tool_calls_before_checkpoint, 30)
 
     def test_missing_stages_fails(self):
         with self.assertRaisesRegex(ValueError, "stages"):
@@ -173,3 +175,54 @@ class WorkflowSpecTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "list of strings"):
             load_workflow_spec(self.write(text))
+
+    def test_discovery_config_top_level_and_step_override_parse(self):
+        block = '''discovery:
+  enabled: true
+  model: opus
+  effort: high
+
+context_economy:
+  max_tool_calls_before_checkpoint: 25
+  checkpoint_after_major_test_milestone: true
+  require_handoff_before_checkpoint: true
+
+'''
+        text = starter_workflow("demo").replace("stages:\n", block + "stages:\n", 1)
+        text = text.replace(
+            "        phases:\n",
+            "        discovery:\n          enabled: false\n          model: sonnet\n          effort: medium\n        phases:\n",
+            1,
+        )
+        spec = load_workflow_spec(self.write(text))
+        self.assertTrue(spec.discovery.enabled)
+        self.assertEqual(spec.discovery.model, "opus")
+        self.assertEqual(spec.context_economy.max_tool_calls_before_checkpoint, 25)
+        step = spec.stages["build"].steps[0]
+        self.assertFalse(step.discovery.enabled)
+        self.assertEqual(step.discovery.model, "sonnet")
+
+    def test_explicit_discovery_phase_enables_discovery_with_default_prompt(self):
+        text = starter_workflow("demo").replace("          - dev\n", "          - discovery\n          - dev\n", 1)
+        spec = load_workflow_spec(self.write(text))
+        step = spec.stages["build"].steps[0]
+        self.assertIn("discovery", step.phases)
+        self.assertTrue(step.discovery.enabled)
+
+    def test_invalid_discovery_and_context_economy_types_fail(self):
+        with self.assertRaisesRegex(ValueError, "top-level discovery.enabled must be a boolean"):
+            load_workflow_spec(self.write(starter_workflow("demo").replace(
+                "stages:\n", "discovery:\n  enabled: yes\n\nstages:\n", 1
+            )))
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            load_workflow_spec(self.write(starter_workflow("demo").replace(
+                "stages:\n", "context_economy:\n  max_tool_calls_before_checkpoint: 0\n\nstages:\n", 1
+            )))
+
+    def test_documented_example_workflows_parse(self):
+        repo = Path(__file__).resolve().parents[1]
+        simple = load_workflow_spec(repo / "examples" / "workflow_simple.yaml")
+        complex_spec = load_workflow_spec(repo / "examples" / "workflow_complex_discovery.yaml")
+        self.assertFalse(simple.stages["build"].steps[0].discovery.enabled)
+        self.assertTrue(complex_spec.stages["build"].steps[0].discovery.enabled)
+        self.assertEqual(complex_spec.commit.mode, "mechanical_all")

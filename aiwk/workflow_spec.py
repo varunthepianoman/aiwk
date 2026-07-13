@@ -9,7 +9,7 @@ import re
 from typing import Any
 from string import Formatter
 
-SUPPORTED_PHASES = {"scope", "dev", "redteam", "review", "commit"}
+SUPPORTED_PHASES = {"scope", "discovery", "dev", "redteam", "review", "commit"}
 COMMIT_MODES = {"none", "mechanical_all", "mechanical_paths"}
 COMMIT_TEMPLATE_FIELDS = {"step_id", "step_title", "project", "stage"}
 
@@ -32,6 +32,20 @@ class BeadsConfig:
     status_filter: str = "open,in_progress,blocked,deferred,closed"
     before_edit_commands: list[str] = field(default_factory=list)
     remember_guidance: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DiscoveryConfig:
+    enabled: bool = False
+    model: str = "opus"
+    effort: str = "high"
+
+
+@dataclass(frozen=True)
+class ContextEconomyConfig:
+    max_tool_calls_before_checkpoint: int = 30
+    checkpoint_after_major_test_milestone: bool = True
+    require_handoff_before_checkpoint: bool = True
 
 
 @dataclass(frozen=True)
@@ -69,6 +83,7 @@ class WorkflowStep:
     prompt: dict[str, str]
     objective_gate: str | None = None
     commit: CommitPolicy | None = None
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
 
 
 @dataclass(frozen=True)
@@ -86,6 +101,8 @@ class WorkflowSpec:
     objective_gates: dict[str, ObjectiveGate] = field(default_factory=dict)
     commit: CommitPolicy = field(default_factory=CommitPolicy)
     beads: BeadsConfig = field(default_factory=BeadsConfig)
+    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+    context_economy: ContextEconomyConfig = field(default_factory=ContextEconomyConfig)
 
 
 def _scalar(text: str) -> Any:
@@ -181,6 +198,8 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
     objective_gates = _load_objective_gates(raw.get("objective_gates", {}))
     commit_policy = _load_commit_policy(raw.get("commit"), CommitPolicy(), "top-level commit")
     beads = _load_beads(raw.get("beads"))
+    discovery = _load_discovery(raw.get("discovery"), DiscoveryConfig(), "top-level discovery")
+    context_economy = _load_context_economy(raw.get("context_economy"))
     stages: dict[str, WorkflowStage] = {}
     for stage_name, stage_raw in raw["stages"].items():
         if not isinstance(stage_raw, dict) or not isinstance(stage_raw.get("steps"), list):
@@ -206,6 +225,9 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
             step_commit = _load_commit_policy(
                 step_raw.get("commit"), commit_policy, f"Step '{step_id}' commit"
             ) if "commit" in step_raw else None
+            step_discovery = _load_discovery(
+                step_raw.get("discovery"), discovery, f"Step '{step_id}' discovery"
+            ) if "discovery" in step_raw else discovery
             if not isinstance(phases, list) or not phases:
                 raise ValueError(f"Step '{step_id}' must define phases")
             if not isinstance(prompts, dict):
@@ -213,8 +235,14 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
             for phase in phases:
                 if phase not in SUPPORTED_PHASES:
                     raise ValueError(f"Unknown phase '{phase}' in step '{step_id}'")
-                if phase != "commit" and (not isinstance(prompts.get(phase), str) or not prompts[phase].strip()):
+                if phase not in {"commit", "discovery"} and (not isinstance(prompts.get(phase), str) or not prompts[phase].strip()):
                     raise ValueError(f"Missing prompt for phase '{phase}' in step '{step_id}'")
+            if "discovery" in phases and not step_discovery.enabled:
+                step_discovery = DiscoveryConfig(enabled=True, model=step_discovery.model, effort=step_discovery.effort)
+            if step_discovery.enabled:
+                prompt_value = prompts.get("discovery")
+                if prompt_value is not None and (not isinstance(prompt_value, str) or not prompt_value.strip()):
+                    raise ValueError(f"Missing prompt for phase 'discovery' in step '{step_id}'")
             steps.append(WorkflowStep(
                 id=step_id,
                 title=str(step_raw.get("title", "")),
@@ -224,13 +252,56 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
                 prompt={str(k): str(v) for k, v in prompts.items()},
                 objective_gate=objective_gate,
                 commit=step_commit,
+                discovery=step_discovery,
             ))
         stages[str(stage_name)] = WorkflowStage(str(stage_raw.get("description", "")), steps)
     return WorkflowSpec(
         project=project, description=str(raw.get("description", "")),
         default_stage=default_stage, stages=stages,
         objective_gates=objective_gates, commit=commit_policy, beads=beads,
+        discovery=discovery, context_economy=context_economy,
     )
+
+
+def _load_discovery(raw: Any, base: DiscoveryConfig, label: str) -> DiscoveryConfig:
+    if raw is None:
+        return base
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be a mapping")
+    enabled = raw.get("enabled", base.enabled)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{label}.enabled must be a boolean")
+    model = raw.get("model", base.model)
+    effort = raw.get("effort", base.effort)
+    if not isinstance(model, str) or not model:
+        raise ValueError(f"{label}.model must be a string")
+    if not isinstance(effort, str) or not effort:
+        raise ValueError(f"{label}.effort must be a string")
+    return DiscoveryConfig(enabled, model, effort)
+
+
+def _load_context_economy(raw: Any) -> ContextEconomyConfig:
+    if raw is None:
+        return ContextEconomyConfig()
+    if not isinstance(raw, dict):
+        raise ValueError("context_economy must be a mapping")
+    defaults = ContextEconomyConfig()
+    max_calls = raw.get("max_tool_calls_before_checkpoint", defaults.max_tool_calls_before_checkpoint)
+    if isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls <= 0:
+        raise ValueError("context_economy.max_tool_calls_before_checkpoint must be a positive integer")
+    checkpoint_after = raw.get(
+        "checkpoint_after_major_test_milestone",
+        defaults.checkpoint_after_major_test_milestone,
+    )
+    if not isinstance(checkpoint_after, bool):
+        raise ValueError("context_economy.checkpoint_after_major_test_milestone must be a boolean")
+    require_handoff = raw.get(
+        "require_handoff_before_checkpoint",
+        defaults.require_handoff_before_checkpoint,
+    )
+    if not isinstance(require_handoff, bool):
+        raise ValueError("context_economy.require_handoff_before_checkpoint must be a boolean")
+    return ContextEconomyConfig(max_calls, checkpoint_after, require_handoff)
 
 
 def _load_beads(raw: Any) -> BeadsConfig:

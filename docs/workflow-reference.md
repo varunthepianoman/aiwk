@@ -57,6 +57,16 @@ beads:
   before_edit_commands: []
   remember_guidance: []
 
+discovery:
+  enabled: false
+  model: opus
+  effort: high
+
+context_economy:
+  max_tool_calls_before_checkpoint: 30
+  checkpoint_after_major_test_milestone: true
+  require_handoff_before_checkpoint: true
+
 objective_gates:
   default:
     enabled: true
@@ -130,6 +140,14 @@ Optional top-level commit policy. Workflows that omit it use legacy `mechanical_
 ### `beads`
 
 Optional Beads prompt/context configuration. Missing config means disabled.
+
+### `discovery`
+
+Optional Discovery-agent default. Missing config means disabled. A step may override it, and an explicit `discovery` phase also enables Discovery for that step.
+
+### `context_economy`
+
+Optional prompt/checkpoint policy. Missing config uses safe defaults. Generated JS surfaces checkpoint requests but does not hard-count provider tool calls.
 
 ### `stages`
 
@@ -243,6 +261,49 @@ beads:
 
 All flags are booleans. `project_hint` and `status_filter` are strings. Command and guidance fields are lists of strings. This configuration changes generated prompt guidance; AIWK does not execute `bd` or automatically create/close issues.
 
+## Discovery and context economy reference
+
+Top-level Discovery defaults:
+
+```yaml
+discovery:
+  enabled: true
+  model: opus
+  effort: high
+```
+
+Per-step override:
+
+```yaml
+steps:
+  - id: BIG_SS1
+    discovery:
+      enabled: true
+      model: opus
+      effort: high
+```
+
+When enabled, the generated sequence is Scope → Discovery → Dev. Discovery is meant for large migrations, unfamiliar package boundaries, or ambiguous work where multiple later agents would otherwise repeat broad repository search. It writes a compact repo-map handoff under `state/handoffs/` and tells Developer which files/symbols/tests to target and what not to rediscover.
+
+Context economy:
+
+```yaml
+context_economy:
+  max_tool_calls_before_checkpoint: 30
+  checkpoint_after_major_test_milestone: true
+  require_handoff_before_checkpoint: true
+```
+
+Fields:
+
+| Field | Type/default | Meaning |
+| --- | --- | --- |
+| `max_tool_calls_before_checkpoint` | positive integer, `30` | Soft prompt budget for long agents. |
+| `checkpoint_after_major_test_milestone` | boolean, `true` | Tell long agents to stop after major compile/test milestones instead of growing one transcript. |
+| `require_handoff_before_checkpoint` | boolean, `true` | Require a written `handoff_path` before returning `status: "checkpoint"`. |
+
+Checkpointing is prompt-level in Pass 1 of this feature: the generated workflow cannot observe internal tool-call counts, but it does return a structured `checkpoint_requested` halt when an agent returns checkpoint status.
+
 ## Stage and step reference
 
 ```yaml
@@ -255,7 +316,19 @@ stages:
         model: sonnet
         effort: medium
         objective_gate: default
-        phases: [unsupported-inline-form]
+        phases:
+          - scope
+          - discovery
+          - dev
+          - redteam
+          - review
+          - commit
+        prompt:
+          scope: Write black-box tests/spec checks.
+          discovery: Map likely files, symbols, tests, and boundaries.
+          dev: Implement the scoped change.
+          redteam: Write adversarial white-box tests.
+          review: Review implementation against gates and invariants.
 ```
 
 Use block-list syntax for phases; inline lists are unsupported:
@@ -320,4 +393,3 @@ Rendering and `gate-run` load the workflow spec and fail clearly for:
 - malformed checks;
 - invalid commit modes or message variables;
 - invalid Beads field types.
-
