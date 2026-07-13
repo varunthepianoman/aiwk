@@ -144,6 +144,7 @@ class WorkflowSpecTests(unittest.TestCase):
     def test_beads_defaults_disabled_and_enabled_config_parses(self):
         disabled = load_workflow_spec(self.write(starter_workflow("demo")))
         self.assertFalse(disabled.beads.enabled)
+        self.assertEqual(disabled.external_memory.mode, "disabled")
         block = '''beads:
   enabled: true
   project_hint: demo-board
@@ -159,10 +160,33 @@ class WorkflowSpecTests(unittest.TestCase):
 
 '''
         text = starter_workflow("demo").replace("stages:\n", block + "stages:\n", 1)
-        enabled = load_workflow_spec(self.write(text)).beads
-        self.assertTrue(enabled.enabled)
-        self.assertEqual(enabled.project_hint, "demo-board")
-        self.assertEqual(len(enabled.before_edit_commands), 2)
+        enabled = load_workflow_spec(self.write(text))
+        self.assertTrue(enabled.beads.enabled)
+        self.assertEqual(enabled.beads.project_hint, "demo-board")
+        self.assertEqual(len(enabled.beads.before_edit_commands), 2)
+        self.assertEqual(enabled.external_memory.mode, "snapshot")
+        self.assertEqual(enabled.external_memory.label, "beads")
+        self.assertTrue(enabled.external_memory.include_in_agent_prompts)
+
+    def test_external_memory_snapshot_config_parses(self):
+        block = '''external_memory:
+  mode: snapshot
+  label: operator-notes
+  include_in_context_pack: true
+  include_in_agent_prompts: true
+
+'''
+        spec = load_workflow_spec(self.write(starter_workflow("demo").replace("stages:\n", block + "stages:\n", 1)))
+        self.assertEqual(spec.external_memory.mode, "snapshot")
+        self.assertEqual(spec.external_memory.label, "operator-notes")
+        self.assertTrue(spec.external_memory.include_in_context_pack)
+        self.assertTrue(spec.external_memory.include_in_agent_prompts)
+
+    def test_invalid_external_memory_config_fails(self):
+        with self.assertRaisesRegex(ValueError, "external_memory.mode"):
+            load_workflow_spec(self.write(starter_workflow("demo").replace(
+                "stages:\n", "external_memory:\n  mode: live\n\nstages:\n", 1
+            )))
 
     def test_invalid_beads_types_fail(self):
         text = starter_workflow("demo").replace(

@@ -24,7 +24,7 @@ class CoordinatorPromptTests(unittest.TestCase):
                 self.assertIn(marker, text)
             self.assertIn(str(repo.resolve()), text)
 
-    def test_render_refreshes_coordinator_and_includes_enabled_beads_commands(self):
+    def test_render_refreshes_coordinator_and_maps_old_beads_to_snapshot_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             repo = root / "repo"
@@ -48,6 +48,10 @@ class CoordinatorPromptTests(unittest.TestCase):
             coordinator = Path(result["coordinator_path"]).read_text(encoding="utf-8")
             self.assertIn("CUSTOM_SS0", coordinator)
             self.assertNotIn("GENERIC_SS0", coordinator)
-            self.assertIn("bd prime || true", coordinator)
-            self.assertIn("exact combined output", coordinator)
-
+            self.assertIn("Optional external memory/operator context", coordinator)
+            self.assertIn("snapshot mode is enabled", coordinator)
+            self.assertIn("Do not mutate the external memory system", coordinator)
+            self.assertIn("beadsSnapshot", coordinator)
+            self.assertNotIn("bd prime || true", coordinator)
+            self.assertNotIn("bd list --status", coordinator)
+            self.assertNotIn("exact combined output", coordinator)

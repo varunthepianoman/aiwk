@@ -66,9 +66,9 @@ def create_context_pack(
             if gate_evidence else "No objective gate evidence supplied."
         ),
     }
-    beads_snapshot = ""
+    external_memory_snapshot = ""
     if beads_snapshot_path:
-        beads_snapshot = beads_snapshot_path.expanduser().read_text(encoding="utf-8")
+        external_memory_snapshot = beads_snapshot_path.expanduser().read_text(encoding="utf-8")
     context_path = state / f"{phase}_context.json"
     handoff_path = state / f"{phase}_handoff.md"
     next_instructions = "Read the project spec, invariants, gates, and this handoff before editing; verify repository state before continuing."
@@ -89,7 +89,6 @@ def create_context_pack(
         "diff_excerpt": diff_excerpt,
         "preflight": {"status": "dirty" if relevant else "ok", "log_path": str(log_path)},
         "objective_gate": objective_gate,
-        "beads": {"snapshot": beads_snapshot, "notes": str(beads_snapshot_path or "")},
         "recent_workflow_results": recent_results,
         "summary": "",
         "decisions": [],
@@ -98,8 +97,23 @@ def create_context_pack(
         "log_paths": [str(log_path)],
         "log_path": str(log_path),
     }
+    if beads_snapshot_path:
+        context["external_memory"] = {
+            "mode": "snapshot",
+            "label": "operator-supplied",
+            "snapshot": external_memory_snapshot,
+            "notes": str(beads_snapshot_path),
+        }
     context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
-    handoff_path.write_text(
+    external_memory_section = (
+        "## Optional external memory snapshot\n\n"
+        "This advisory operator-supplied memory may be stale or incomplete. "
+        "Current source, specs, gate evidence, and git state override it.\n\n"
+        f"- Snapshot file: `{beads_snapshot_path}`\n\n"
+        f"```text\n{external_memory_snapshot}\n```\n\n"
+        if beads_snapshot_path else ""
+    )
+    handoff_text = (
         f"# AIWK Handoff: {phase}\n\n"
         "## Current state\n\n"
         f"- Project: `{config.project}`\n- Repo: `{repo}`\n- Step: `{step or 'not specified'}`\n"
@@ -112,12 +126,13 @@ def create_context_pack(
         f"- Objective gate evidence: `{objective_gate['evidence_path'] or 'none'}`\n"
         f"- Objective gate log: `{objective_gate['log_path'] or 'none'}`\n"
         f"- Objective gate summary: {objective_gate['summary']}\n"
-        f"- Beads snapshot file: `{beads_snapshot_path or 'none'}`\n\n"
+        + external_memory_section
+        +
         "## Known failures / blockers\n\nTODO\n\n"
         "## Decisions / invariants to preserve\n\nTODO\n\n"
-        f"## Next-agent instructions\n\n{next_instructions}\n",
-        encoding="utf-8",
+        f"## Next-agent instructions\n\n{next_instructions}\n"
     )
+    handoff_path.write_text(handoff_text, encoding="utf-8")
     return {
         "status": "ok", "handoff_path": str(handoff_path),
         "context_path": str(context_path), "log_path": str(log_path),

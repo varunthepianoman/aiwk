@@ -34,7 +34,7 @@ The target repository and AIWK project are separate concerns. `init` writes only
 
 Durable author-edited inputs:
 
-- `workflow.yaml` controls stages, steps, objective commands, commit behavior, and optional Beads guidance.
+- `workflow.yaml` controls stages, steps, objective commands, commit behavior, and optional advisory external-memory snapshot behavior.
 - `project.spec.md` defines outcome and boundaries.
 - `invariants.yaml` records properties to preserve.
 - `gates.yaml` records semantic reviewer gates.
@@ -162,11 +162,11 @@ No commit agent runs. The structured result records a skipped commit, and clean-
 
 The separate `aiwk checkpoint` CLI is a direct utility that stages all target-repo changes. It is not invoked by the generated commit policy.
 
-## Beads boundary
+## External memory / Beads boundary
 
-Beads configuration controls context and role guidance. It may instruct agents to run configured `bd` commands and use durable issue memory. AIWK itself does not execute those commands or own issue state.
+AIWK is Beads-blind by default. It does not require Beads, run `bd`, manage issues, or treat any external tracker as source of truth.
 
-This keeps workflows usable without Beads and avoids coupling the core tool to a tracker API.
+Legacy `beads.enabled: true` configs remain parseable but map to snapshot-only advisory memory. When explicit snapshot mode is enabled and an operator supplies text, generated prompts may include that text under an optional external-memory section. Agents are told that source, specs, gate evidence, and Git state override the snapshot and that they must not mutate external memory or run `bd` commands.
 
 ## Context and handoff boundary
 
@@ -184,7 +184,7 @@ Context packs intentionally prefer summaries and pointers over full data:
 
 - diff excerpts are opt-in and line-limited;
 - gate logs remain separate files;
-- Beads snapshots are included only when supplied;
+- optional external-memory snapshots are included only when supplied and explicitly enabled;
 - source and committed specs override stale handoff text.
 
 Discovery agents are optional. They centralize broad repository mapping before Developer so later agents can use targeted verification instead of repeated global sweeps.

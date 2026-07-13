@@ -328,18 +328,48 @@ context_economy:
 
     def test_beads_enabled_and_disabled_rendering(self):
         disabled = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
-        self.assertIn("BEADS_CONFIG", disabled)
         self.assertIn("beadsSnapshot", disabled)
-        self.assertNotIn("LIVE BEADS DISCIPLINE", disabled)
-        self.assertNotIn("bd prime", disabled)
+        for forbidden in (
+            "BEADS_CONFIG", "LIVE BEADS DISCIPLINE", "ACTIVE BEADS PROJECT LEDGER SNAPSHOT",
+            "bd prime", "bd list", "bd create", "bd update", "bd remember",
+            "Use bd remember", "create one only if", "Beads issue",
+            "Do not run bd commands", "OPTIONAL EXTERNAL MEMORY SNAPSHOT",
+        ):
+            with self.subTest(default_forbidden=forbidden):
+                self.assertNotIn(forbidden, disabled)
         self.enable_beads()
         enabled = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
         for marker in (
-            "BEADS_CONFIG", "getActiveBeadsContext", "withBeadsContext",
-            "ACTIVE BEADS PROJECT LEDGER SNAPSHOT", "LIVE BEADS DISCIPLINE",
-            "bd prime", "bd list --status", "bd remember", "beadsSnapshot",
+            "EXTERNAL_MEMORY_CONFIG", "OPTIONAL EXTERNAL MEMORY SNAPSHOT",
+            "advisory operator-supplied long-term memory",
+            "Current source, specs, gate evidence, and git state override this snapshot",
+            "Do not mutate the external memory system",
+            "Do not run bd commands", "beadsSnapshot",
         ):
             self.assertIn(marker, enabled)
+        for forbidden in (
+            "LIVE BEADS DISCIPLINE", "ACTIVE BEADS PROJECT LEDGER SNAPSHOT",
+            "bd prime", "bd list --status", "bd create", "bd update",
+            "bd remember", "Use bd remember", "create one only if", "Beads issue",
+        ):
+            self.assertNotIn(forbidden, enabled)
+
+    def test_generated_prompts_scrub_legacy_live_beads_commands(self):
+        project_spec = self.project_root / "spec" / "project.spec.md"
+        project_spec.write_text("Run bd prime and use bd remember before edits.\n", encoding="utf-8")
+        workflow = self.project_root / "workflow.yaml"
+        workflow.write_text(
+            workflow.read_text(encoding="utf-8").replace(
+                "TODO implement the scoped change.",
+                "Run bd list before implementing.",
+            ),
+            encoding="utf-8",
+        )
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        self.assertIn("external-memory command suppressed", text)
+        self.assertNotIn("bd prime", text)
+        self.assertNotIn("bd list", text)
+        self.assertNotIn("bd remember", text)
 
     def test_render_inlines_durable_context_contents(self):
         project_spec = self.project_root / "spec" / "project.spec.md"

@@ -28,27 +28,25 @@ def coordinator_prompt(
     default_steps = [step.id for step in spec.stages[default_stage].steps]
     handoff_path = project_root / "state" / "COORDINATOR_PRESTART_handoff.md"
     preflight_path = project_root / "state" / "coordinator_preflight.json"
-    beads_snapshot_path = project_root / "state" / "coordinator_beads_snapshot.txt"
+    external_memory_snapshot_path = project_root / "state" / "coordinator_external_memory_snapshot.txt"
     stage_lines = []
     for stage_name, stage in spec.stages.items():
         stage_lines.append(f"- `{stage_name}`: " + ", ".join(f"`{step.id}`" for step in stage.steps))
-    beads_value = ""
-    beads_context_option = ""
-    beads_block = "Beads is disabled. Use an empty `beadsSnapshot`; do not require or invent `bd` commands."
-    if spec.beads.enabled:
-        commands = spec.beads.before_edit_commands or [
-            "bd prime || true",
-            f"bd list --status {spec.beads.status_filter} || true",
-        ]
-        rendered = "\n".join(f"  {command}" for command in commands)
-        beads_value = f"<replace with exact contents of {beads_snapshot_path}>"
-        beads_context_option = f" --beads-snapshot-file {shlex.quote(str(beads_snapshot_path))}"
-        beads_block = (
-            "Beads is enabled. Run the configured commands and persist their exact combined output:\n\n"
-            "```bash\n"
-            f"cd {shlex.quote(str(repo))}\n{{\n{rendered}\n}} 2>&1 | tee {shlex.quote(str(beads_snapshot_path))}\n"
-            "```\n\n"
-            f"Use the exact contents of `{beads_snapshot_path}`—not a phrase such as “use fresh Beads state”—as `beadsSnapshot`."
+    external_memory_value = ""
+    external_memory_context_option = ""
+    external_memory_block = (
+        "External memory is disabled. Use an empty `beadsSnapshot` compatibility argument. "
+        "Do not require, invent, or mutate any external memory system."
+    )
+    if spec.external_memory.mode == "snapshot":
+        external_memory_value = f"<optional exact contents of {external_memory_snapshot_path}>"
+        external_memory_context_option = f" --beads-snapshot-file {shlex.quote(str(external_memory_snapshot_path))}"
+        external_memory_block = (
+            "External memory snapshot mode is enabled. This is advisory and operator-supplied only.\n\n"
+            f"If you have a relevant existing snapshot, write its exact contents to `{external_memory_snapshot_path}` and use that text as `beadsSnapshot`. "
+            "If no snapshot is available, leave `beadsSnapshot` empty and continue.\n\n"
+            "Do not mutate the external memory system. Do not run `bd` commands from this runbook. "
+            "Current source, specs, gate evidence, and git state override any snapshot."
         )
     args = {
         "stage": default_stage,
@@ -56,7 +54,7 @@ def coordinator_prompt(
         "onlyStep": None,
         "preflightSummary": f"<replace with exact JSON from {preflight_path}>",
         "handoffPath": str(handoff_path),
-        "beadsSnapshot": beads_value,
+        "beadsSnapshot": external_memory_value,
     }
     commit = spec.commit
     return f"""# AIWK Master Coordinator Prompt: {config.project}
@@ -109,12 +107,12 @@ Run these exact commands from any directory. Preserve their compact JSON output.
 
    Confirm `{preflight_path}` contains the exact compact JSON and use that content as `preflightSummary`. If `dirty_relevant` is true, inspect the referenced log and stop when changes are unrelated, unexplained, or unsafe for commit mode `{commit.mode}`. Never clean, reset, stage, or discard user work merely to make preflight green.
 
-3. Complete the Beads/operator-context procedure below. When Beads is enabled, do not continue until `{beads_snapshot_path}` exists and contains the captured command output.
+3. Complete the optional external-memory procedure below. Do not require any external memory snapshot unless the durable workflow config explicitly asks for one and the operator supplies it.
 
 4. Create a durable prestart context pack after operator context has been collected:
 
    ```bash
-   {python} -m aiwk context-pack --config {config_arg} --phase COORDINATOR_PRESTART --include-diff --max-diff-lines 80{beads_context_option}
+   {python} -m aiwk context-pack --config {config_arg} --phase COORDINATOR_PRESTART --include-diff --max-diff-lines 80{external_memory_context_option}
    ```
 
    Confirm the handoff exists at `{handoff_path}` and use that exact path as `handoffPath`. If it links older objective-gate evidence, treat that evidence as historical context only; the launched workflow must produce fresh evidence for its own attempts.
@@ -127,9 +125,9 @@ Run these exact commands from any directory. Preserve their compact JSON output.
 
    If Node is unavailable, report that fact; do not edit generated JavaScript to work around it.
 
-## Beads/operator context
+## Optional external memory/operator context
 
-{beads_block}
+{external_memory_block}
 
 ## Runtime request
 

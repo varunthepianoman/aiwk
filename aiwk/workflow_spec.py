@@ -25,6 +25,7 @@ class CommitPolicy:
 @dataclass(frozen=True)
 class BeadsConfig:
     enabled: bool = False
+    legacy_prompt_guidance: bool = False
     project_hint: str = ""
     require_before_edit: bool = False
     allow_create_issue: bool = False
@@ -32,6 +33,14 @@ class BeadsConfig:
     status_filter: str = "open,in_progress,blocked,deferred,closed"
     before_edit_commands: list[str] = field(default_factory=list)
     remember_guidance: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ExternalMemoryConfig:
+    mode: str = "disabled"
+    label: str = "external memory"
+    include_in_context_pack: bool = False
+    include_in_agent_prompts: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,7 @@ class WorkflowSpec:
     objective_gates: dict[str, ObjectiveGate] = field(default_factory=dict)
     commit: CommitPolicy = field(default_factory=CommitPolicy)
     beads: BeadsConfig = field(default_factory=BeadsConfig)
+    external_memory: ExternalMemoryConfig = field(default_factory=ExternalMemoryConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     context_economy: ContextEconomyConfig = field(default_factory=ContextEconomyConfig)
 
@@ -198,6 +208,7 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
     objective_gates = _load_objective_gates(raw.get("objective_gates", {}))
     commit_policy = _load_commit_policy(raw.get("commit"), CommitPolicy(), "top-level commit")
     beads = _load_beads(raw.get("beads"))
+    external_memory = _load_external_memory(raw.get("external_memory"), beads)
     discovery = _load_discovery(raw.get("discovery"), DiscoveryConfig(), "top-level discovery")
     context_economy = _load_context_economy(raw.get("context_economy"))
     stages: dict[str, WorkflowStage] = {}
@@ -259,8 +270,37 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
         project=project, description=str(raw.get("description", "")),
         default_stage=default_stage, stages=stages,
         objective_gates=objective_gates, commit=commit_policy, beads=beads,
+        external_memory=external_memory,
         discovery=discovery, context_economy=context_economy,
     )
+
+
+def _load_external_memory(raw: Any, beads: BeadsConfig) -> ExternalMemoryConfig:
+    defaults = ExternalMemoryConfig()
+    if raw is None:
+        if beads.enabled:
+            return ExternalMemoryConfig(
+                mode="snapshot",
+                label="beads",
+                include_in_context_pack=True,
+                include_in_agent_prompts=True,
+            )
+        return defaults
+    if not isinstance(raw, dict):
+        raise ValueError("external_memory must be a mapping")
+    mode = raw.get("mode", defaults.mode)
+    if not isinstance(mode, str) or mode not in {"disabled", "snapshot"}:
+        raise ValueError("external_memory.mode must be one of: disabled, snapshot")
+    label = raw.get("label", defaults.label)
+    if not isinstance(label, str) or not label:
+        raise ValueError("external_memory.label must be a string")
+    include_context = raw.get("include_in_context_pack", defaults.include_in_context_pack)
+    include_prompts = raw.get("include_in_agent_prompts", defaults.include_in_agent_prompts)
+    if not isinstance(include_context, bool):
+        raise ValueError("external_memory.include_in_context_pack must be a boolean")
+    if not isinstance(include_prompts, bool):
+        raise ValueError("external_memory.include_in_agent_prompts must be a boolean")
+    return ExternalMemoryConfig(mode, label, include_context, include_prompts)
 
 
 def _load_discovery(raw: Any, base: DiscoveryConfig, label: str) -> DiscoveryConfig:
@@ -310,7 +350,7 @@ def _load_beads(raw: Any) -> BeadsConfig:
     if not isinstance(raw, dict):
         raise ValueError("beads must be a mapping")
     defaults = BeadsConfig()
-    bool_fields = ("enabled", "require_before_edit", "allow_create_issue", "allow_remember")
+    bool_fields = ("enabled", "legacy_prompt_guidance", "require_before_edit", "allow_create_issue", "allow_remember")
     values: dict[str, Any] = {}
     for name in bool_fields:
         value = raw.get(name, getattr(defaults, name))

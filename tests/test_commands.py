@@ -44,6 +44,9 @@ class CommandTests(unittest.TestCase):
         context = create_context_pack(self.config, self.config_path, "PHASE_1")
         self.assertTrue(Path(context["handoff_path"]).is_file())
         self.assertTrue(Path(context["context_path"]).is_file())
+        data = json.loads(Path(context["context_path"]).read_text(encoding="utf-8"))
+        self.assertNotIn("beads", data)
+        self.assertNotIn("external_memory", data)
 
     def test_rich_context_pack_with_bounded_diff_and_evidence(self):
         (self.repo / "tracked.txt").write_text("\n".join(f"line {i}" for i in range(20)) + "\n", encoding="utf-8")
@@ -52,20 +55,22 @@ class CommandTests(unittest.TestCase):
             "gate": "default", "gate_clean": False, "build_rc": 7,
             "test_rc": 0, "result_rc": 0, "log_path": "/tmp/gate.log",
         }), encoding="utf-8")
-        beads = self.config_path.parent / "beads.txt"
-        beads.write_text("issue DEMO-1 in_progress\n", encoding="utf-8")
+        snapshot = self.config_path.parent / "external_memory.txt"
+        snapshot.write_text("operator memory DEMO-1 in_progress\n", encoding="utf-8")
         result = create_context_pack(
             self.config, self.config_path, "DEV", "STEP_1", True, 5,
-            evidence, beads,
+            evidence, snapshot,
         )
         context = json.loads(Path(result["context_path"]).read_text(encoding="utf-8"))
         for key in ("changed_files", "diff_stat", "head", "branch", "status_short", "next_agent_instructions"):
             self.assertIn(key, context)
         self.assertLessEqual(len(context["diff_excerpt"].splitlines()), 5)
         self.assertEqual(context["objective_gate"]["evidence_path"], str(evidence))
-        self.assertIn("DEMO-1", context["beads"]["snapshot"])
+        self.assertNotIn("beads", context)
+        self.assertIn("DEMO-1", context["external_memory"]["snapshot"])
         handoff = Path(result["handoff_path"]).read_text(encoding="utf-8")
         self.assertIn(str(evidence), handoff)
+        self.assertIn("Optional external memory snapshot", handoff)
 
     def test_checkpoint_and_nothing_to_commit(self):
         (self.repo / "tracked.txt").write_text("changed\n", encoding="utf-8")

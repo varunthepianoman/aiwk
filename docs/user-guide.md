@@ -105,7 +105,7 @@ gates:
 
 ### `workflow.yaml`
 
-Define stages, steps, prompts, objective commands, commit policy, and optional Beads guidance. See the [workflow reference](workflow-reference.md) for every supported field.
+Define stages, steps, prompts, objective commands, commit policy, and optional advisory external-memory snapshot behavior. See the [workflow reference](workflow-reference.md) for every supported field.
 
 At minimum, replace:
 
@@ -231,7 +231,7 @@ The recommended entry point is the generated coordinator prompt:
 ~/dev/.aiwk/my_refactor/master_coordinator_prompt.md
 ```
 
-Give it to the coordinating operator/agent. It instructs the coordinator to rerender, run fresh preflight, verify prerequisite sections from durable evidence, create a prestart context pack, collect configured Beads output, construct concrete arguments, launch the workflow, and report structured halts. The generated workflow—not the coordinator—owns role sequencing.
+Give it to the coordinating operator/agent. It instructs the coordinator to rerender, run fresh preflight, verify prerequisite sections from durable evidence, create a prestart context pack, collect any explicitly configured advisory snapshot text, construct concrete arguments, launch the workflow, and report structured halts. The generated workflow—not the coordinator—owns role sequencing.
 
 Supported runtime arguments:
 
@@ -241,7 +241,7 @@ Supported runtime arguments:
   "onlyStep": "GENERIC_SS0",
   "preflightSummary": "Use the latest AIWK preflight JSON.",
   "handoffPath": "/home/me/dev/.aiwk/my_refactor/state/PREVIOUS_handoff.md",
-  "beadsSnapshot": "Optional current tracker state"
+  "beadsSnapshot": "Optional advisory external-memory snapshot when explicitly enabled"
 }
 ```
 
@@ -253,7 +253,7 @@ Argument behavior:
 - `onlyStep` and `fromStep` are mutually exclusive.
 - `preflightSummary`: operator-provided deterministic context.
 - `handoffPath`: durable context the agents are instructed to read before editing.
-- `beadsSnapshot`: optional tracker state, whether or not Beads discipline is enabled.
+- `beadsSnapshot`: backward-compatible argument name for optional advisory external-memory snapshot text. It is ignored unless snapshot mode is explicitly enabled.
 
 Unknown stages or step IDs return a structured selection halt rather than silently running another step.
 
@@ -373,8 +373,10 @@ Optional inputs:
 
 ```bash
 --gate-evidence path/to/evidence.json
---beads-snapshot-file path/to/beads.txt
+--beads-snapshot-file path/to/external_memory_snapshot.txt
 ```
+
+The flag name is retained for compatibility. When supplied, context-pack records the file under `external_memory` / “Optional external memory snapshot,” not as live Beads state.
 
 Without an explicit gate evidence path, `context-pack` uses the lexically latest JSON under `state/gates/` when available. It writes stable phase paths:
 

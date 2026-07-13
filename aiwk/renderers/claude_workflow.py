@@ -22,6 +22,26 @@ def _read_context_file(path: Path) -> str:
         return f"(missing: {path})"
 
 
+def _beads_blind_text(text: str) -> str:
+    """Suppress legacy live Beads command guidance in generated prompts."""
+    replacements = {
+        "LIVE BEADS DISCIPLINE": "EXTERNAL MEMORY DISCIPLINE SUPPRESSED",
+        "ACTIVE BEADS PROJECT LEDGER SNAPSHOT": "OPTIONAL EXTERNAL MEMORY SNAPSHOT",
+        "bd prime": "[external-memory command suppressed]",
+        "bd list": "[external-memory command suppressed]",
+        "bd create": "[external-memory command suppressed]",
+        "bd update": "[external-memory command suppressed]",
+        "bd remember": "[external-memory command suppressed]",
+        "Use bd remember": "Use durable AIWK handoffs",
+        "create one only if": "record only if",
+        "Beads issue": "external-memory item",
+    }
+    result = text
+    for old, new in replacements.items():
+        result = result.replace(old, new)
+    return result
+
+
 def render_claude_workflow(
     config: Config,
     config_path: Path,
@@ -48,9 +68,9 @@ def render_claude_workflow(
         **{name: str(path) for name, path in context_paths.items()},
     }
     durable_context = {
-        "projectSpec": _read_context_file(context_paths["projectSpecPath"]),
-        "invariants": _read_context_file(context_paths["invariantsPath"]),
-        "gates": _read_context_file(context_paths["gatesPath"]),
+        "projectSpec": _beads_blind_text(_read_context_file(context_paths["projectSpecPath"])),
+        "invariants": _beads_blind_text(_read_context_file(context_paths["invariantsPath"])),
+        "gates": _beads_blind_text(_read_context_file(context_paths["gatesPath"])),
     }
     def rendered_gate(gate_name: str | None) -> dict[str, object] | None:
         if gate_name is None:
@@ -95,7 +115,7 @@ def render_claude_workflow(
                     "model": step.model,
                     "effort": step.effort,
                     "phases": step.phases,
-                    "prompt": step.prompt,
+                    "prompt": {key: _beads_blind_text(value) for key, value in step.prompt.items()},
                     "objectiveGate": rendered_gate(step.objective_gate),
                     "commitPolicy": rendered_commit(step),
                     "discovery": rendered_discovery(step),
@@ -110,54 +130,37 @@ def render_claude_workflow(
         (step.commit or spec.commit).mode == "mechanical_paths"
         for stage in spec.stages.values() for step in stage.steps
     )
-    beads_config = asdict(spec.beads)
-    if spec.beads.enabled:
-        beads_context_js = r'''function getActiveBeadsContext(runtime) {
-  return runtime.BEADS_LEDGER_SNAPSHOT || `(no beadsSnapshot supplied; project hint: ${BEADS_CONFIG.project_hint || "none"})`;
+    external_memory_config = asdict(spec.external_memory)
+    if spec.external_memory.mode == "snapshot" and spec.external_memory.include_in_agent_prompts:
+        external_memory_context_js = r'''function getExternalMemorySnapshot(runtime) {
+  return runtime.BACKCOMPAT_BEADS_SNAPSHOT || "";
 }
 
-function beadsContext(runtime) {
-  const commands = (BEADS_CONFIG.before_edit_commands || []).map((command) => `  ${command}`).join("\n") || "  (no commands configured)";
-  const guidance = (BEADS_CONFIG.remember_guidance || []).map((item) => `  - ${item}`).join("\n");
-  return `=== ACTIVE BEADS PROJECT LEDGER SNAPSHOT ===
-The workflow runtime cannot assume transcript memory. Use this snapshot to avoid duplicate work and understand blockers.
-If this ledger conflicts with committed source/specs, committed source/specs and this workflow's explicit scope win.
-${getActiveBeadsContext(runtime)}
+function externalMemoryContext(runtime) {
+  const snapshot = getExternalMemorySnapshot(runtime);
+  if (!snapshot) return "";
+  return `=== OPTIONAL EXTERNAL MEMORY SNAPSHOT ===
+This is advisory operator-supplied long-term memory.
+It may be stale or incomplete.
+Current source, specs, gate evidence, and git state override this snapshot.
+Do not mutate the external memory system.
+Do not run bd commands.
+Label: ${EXTERNAL_MEMORY_CONFIG.label}
 
-=== LIVE BEADS DISCIPLINE ===
-Before modifying code, run:
-${commands}
-If a relevant issue exists, update it. Create one only when allowed and useful.
-Use bd remember for durable decisions when allowed. Do not use ad-hoc markdown task lists as durable trackers.
-${guidance}`;
-}'''
-        beads_role_js = r'''function beadsRoleGuidance(role) {
-  const guidance = {
-    scope: "If Beads is enabled, note the issue/spec this scoping work corresponds to; avoid noisy issues.",
-    dev: "If Beads is enabled, update relevant issue state and use bd remember for durable decisions when useful.",
-    redteam: "If Beads is enabled, record only durable blocker defects, not transient local failures.",
-    review: "If Beads is enabled, verify meaningful blockers appear in Beads or the workflow result.",
-    commit: "If Beads is enabled, mention remaining blockers after commit.",
-  };
-  return guidance[role] || "";
+${snapshot}`;
 }'''
     else:
-        beads_context_js = r'''function getActiveBeadsContext(runtime) {
-  return runtime.BEADS_LEDGER_SNAPSHOT || "";
-}
-
-function beadsContext(runtime) {
-  const snapshot = getActiveBeadsContext(runtime);
-  return snapshot ? `Optional operator-supplied tracker context:\n${snapshot}` : "";
+        external_memory_context_js = r'''function externalMemoryContext(runtime) {
+  return "";
 }'''
-        beads_role_js = 'function beadsRoleGuidance(role) { return ""; }'
+    external_memory_role_js = 'function externalMemoryRoleGuidance(role) { return ""; }'
 
     template = r'''// Generated by aiwk. Edit workflow.yaml/spec files, then render again.
 export const meta = __META__;
 
 const STATIC_CONTEXT = __STATIC_CONTEXT__;
 const DURABLE_CONTEXT = __DURABLE_CONTEXT__;
-const BEADS_CONFIG = __BEADS_CONFIG__;
+const EXTERNAL_MEMORY_CONFIG = __EXTERNAL_MEMORY_CONFIG__;
 const CONTEXT_ECONOMY = __CONTEXT_ECONOMY__;
 const ALL_STEPS = __STAGES__;
 const MAX_DEV_RED_CYCLES = 2;
@@ -242,13 +245,13 @@ const DISCOVERY_SCHEMA = {
 
 const SCOPE_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["status", "summary", "test_files_written", "scope_ok", "beads_notes", "handoff", "notes", ...HANDOFF_REQUIRED],
+  required: ["status", "summary", "test_files_written", "scope_ok", "external_memory_notes", "handoff", "notes", ...HANDOFF_REQUIRED],
   properties: {
     status: { type: "string", enum: ["done", "blocked", "needs_decision", "checkpoint"] },
     summary: { type: "string" },
     test_files_written: { type: "array", items: { type: "string" } },
     scope_ok: { type: "boolean" },
-    beads_notes: { type: "string" },
+    external_memory_notes: { type: "string" },
     handoff: { type: "string" },
     notes: { type: "string" },
     reason: { type: "string" },
@@ -261,16 +264,16 @@ const SCOPE_SCHEMA = {
 
 const IMPL_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["status", "summary", "tests_added", "scope_ok", "self_build_passed", "beads_issues_opened", "beads_issues_closed", "beads_memory_written", "handoff", "notes", ...HANDOFF_REQUIRED],
+  required: ["status", "summary", "tests_added", "scope_ok", "self_build_passed", "external_memory_items_opened", "external_memory_items_closed", "external_memory_written", "handoff", "notes", ...HANDOFF_REQUIRED],
   properties: {
     status: { type: "string", enum: ["done", "blocked", "scope_violation", "needs_decision", "invalid_test", "checkpoint"] },
     summary: { type: "string" },
     tests_added: { type: "array", items: { type: "string" } },
     scope_ok: { type: "boolean" },
     self_build_passed: { type: ["boolean", "null"] },
-    beads_issues_opened: { type: "array", items: { type: "string" } },
-    beads_issues_closed: { type: "array", items: { type: "string" } },
-    beads_memory_written: { type: ["boolean", "null"] },
+    external_memory_items_opened: { type: "array", items: { type: "string" } },
+    external_memory_items_closed: { type: "array", items: { type: "string" } },
+    external_memory_written: { type: ["boolean", "null"] },
     handoff: { type: "string" },
     notes: { type: "string" },
     reason: { type: "string" },
@@ -283,14 +286,14 @@ const IMPL_SCHEMA = {
 
 const RED_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["status", "summary", "adversarial_tests_written", "tests_passed", "failures_found", "beads_notes", "handoff", "notes", ...HANDOFF_REQUIRED],
+  required: ["status", "summary", "adversarial_tests_written", "tests_passed", "failures_found", "external_memory_notes", "handoff", "notes", ...HANDOFF_REQUIRED],
   properties: {
     status: { type: "string", enum: ["all_passed", "failures_found", "blocked", "needs_decision", "checkpoint"] },
     summary: { type: "string" },
     adversarial_tests_written: { type: "array", items: { type: "string" } },
     tests_passed: { type: "boolean" },
     failures_found: { type: "array", items: { type: "object", additionalProperties: false, required: ["test_name", "detail"], properties: { test_name: { type: "string" }, detail: { type: "string" } } } },
-    beads_notes: { type: "string" },
+    external_memory_notes: { type: "string" },
     handoff: { type: "string" },
     notes: { type: "string" },
     reason: { type: "string" },
@@ -303,7 +306,7 @@ const RED_SCHEMA = {
 
 const REVIEW_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["accepted", "build_passed", "gtests_passed", "scope_clean", "findings", "beads_notes", "verdict_reason", "handoff", ...HANDOFF_REQUIRED],
+  required: ["accepted", "build_passed", "gtests_passed", "scope_clean", "findings", "external_memory_notes", "verdict_reason", "handoff", ...HANDOFF_REQUIRED],
   properties: {
     status: { type: "string", enum: ["done", "blocked", "needs_decision", "checkpoint"] },
     accepted: { type: "boolean" },
@@ -311,7 +314,7 @@ const REVIEW_SCHEMA = {
     gtests_passed: { type: "boolean" },
     scope_clean: { type: "boolean" },
     findings: { type: "array", items: { type: "object", additionalProperties: false, required: ["severity", "detail"], properties: { severity: { type: "string", enum: ["blocker", "major", "minor"] }, detail: { type: "string" } } } },
-    beads_notes: { type: "string" },
+    external_memory_notes: { type: "string" },
     verdict_reason: { type: "string" },
     handoff: { type: "string" },
     reason: { type: "string" },
@@ -404,9 +407,9 @@ ${DURABLE_CONTEXT.invariants}
 === GATES (spec/gates.yaml) ===
 ${DURABLE_CONTEXT.gates}`;
 
-__BEADS_CONTEXT_JS__
+__EXTERNAL_MEMORY_CONTEXT_JS__
 
-__BEADS_ROLE_JS__
+__EXTERNAL_MEMORY_ROLE_JS__
 
 function uniqueNonEmpty(values) {
   const result = [];
@@ -570,7 +573,7 @@ function missingHandoffReturn(step, role, stage, results) {
   return { halted_at: `${step.id}:${role}`, reason: "missing_handoff_path", stage, results };
 }
 
-function withBeadsContext(prompt, runtime) {
+function withRuntimeContext(prompt, runtime) {
   return `${CONTEXT}
 
 Preflight summary supplied by operator:
@@ -582,7 +585,7 @@ If handoffPath is supplied, read it before editing. Treat it as durable operator
 If it conflicts with source/specs, source/specs win.
 AIWK context-pack files are under ${STATIC_CONTEXT.statePath}.
 
-${beadsContext(runtime)}
+${externalMemoryContext(runtime)}
 
 Read the durable spec, invariants, and gates before editing. Use repository files as source of truth.
 Use the supplied preflight summary; do not rerun broad preflight unless stale or contradicted.
@@ -686,7 +689,7 @@ Your job is architecture correctness, scope discipline, stale assumptions, code 
 If the objective gate shows build_rc/test_rc/result_rc nonzero or check count above threshold, explain what is wrong and how to fix it.
 Your acceptance is necessary but not sufficient.
 Reject broad or fragile changes and stale assumptions.
-${beadsRoleGuidance("review")}
+${externalMemoryRoleGuidance("review")}
 
 Important review/commit ordering:
 This review runs before the Commit phase. Expected in-scope changes may be modified or untracked at review time. Do not reject solely because expected in-scope files are modified or untracked. Reject unrelated dirty files, generated workflow artifacts, logs, build outputs, transcripts, or scope creep. The Commit phase is responsible for explicit-path staging and final clean status.
@@ -737,7 +740,7 @@ Do not selectively stage. Do not rewrite the commit message creatively.
 Do not commit if review or objective gate acceptance failed; if you are invoked after a failed review/gate, report failed.
 If status_after is not empty, fail loudly and set clean_after:false.
 If git commit says nothing to commit, report that exactly.
-${beadsRoleGuidance("commit")}
+${externalMemoryRoleGuidance("commit")}
 Return the final status and commit hash if a commit was created.`;
   }
 __MECHANICAL_PATHS_BRANCH__
@@ -760,10 +763,10 @@ async function runWorkflow(rawArgs) {
   const STAGE = WORKFLOW_ARGS.stage || meta.defaultStage;
   const FROM_STEP = WORKFLOW_ARGS.fromStep || null;
   const ONLY_STEP = WORKFLOW_ARGS.onlyStep || null;
-  const BEADS_LEDGER_SNAPSHOT = WORKFLOW_ARGS.beadsSnapshot || "(no beadsSnapshot supplied)";
+  const BACKCOMPAT_BEADS_SNAPSHOT = WORKFLOW_ARGS.beadsSnapshot || "";
   const PREFLIGHT_SUMMARY = WORKFLOW_ARGS.preflightSummary || "(no preflightSummary supplied)";
   const HANDOFF_PATH = WORKFLOW_ARGS.handoffPath || "";
-  const runtime = { BEADS_LEDGER_SNAPSHOT, PREFLIGHT_SUMMARY, HANDOFF_PATH };
+  const runtime = { BACKCOMPAT_BEADS_SNAPSHOT, PREFLIGHT_SUMMARY, HANDOFF_PATH };
   const results = [];
   let steps;
   try { steps = selectSteps(STAGE, FROM_STEP, ONLY_STEP); }
@@ -779,10 +782,10 @@ async function runWorkflow(rawArgs) {
 
     if (step.phases.includes("scope")) {
       const scope = await agent(
-        withBeadsContext(`=== SCOPING TEST WRITER: ${step.id} — ${step.title} ===
+        withRuntimeContext(`=== SCOPING TEST WRITER: ${step.id} — ${step.title} ===
 Write BLACK BOX tests/spec artifacts ONLY. No implementation code.
 Strictly follow the step scope.
-${beadsRoleGuidance("scope")}
+${externalMemoryRoleGuidance("scope")}
 ${contextEconomyPolicy("scope")}
 ${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
 ${handoffInstructions(step, "SCOPE", 0, "scope")}
@@ -802,7 +805,7 @@ ${step.prompt.scope}`, runtime),
     const discoveryEnabled = !!(step.discovery && step.discovery.enabled) || step.phases.includes("discovery");
     if (discoveryEnabled) {
       const discovery = await agent(
-        withBeadsContext(`=== DISCOVERY AGENT: ${step.id} — ${step.title} ===
+        withRuntimeContext(`=== DISCOVERY AGENT: ${step.id} — ${step.title} ===
 You are the Discovery agent. Perform broad but bounded repository/source discovery for this step.
 Do not edit production code unless the workflow phase explicitly asks for edits. Your output is a compact repo map handoff for Developer.
 Identify exact files, symbols, tests, command entrypoints, and risks likely relevant to this step.
@@ -832,11 +835,11 @@ ${step.prompt.discovery || "Create a compact repo map for this step. Identify li
     for (let cycle = 1; cycle <= devCycles && !redPassed; cycle++) {
       if (step.phases.includes("dev")) {
         const impl = await agent(
-          withBeadsContext(`=== DEVELOPER: ${step.id} — ${step.title} (cycle ${cycle}) ===
+          withRuntimeContext(`=== DEVELOPER: ${step.id} — ${step.title} (cycle ${cycle}) ===
 Implement only this sub-step. Pass the Scoping Tests.
 Respect invariants and out-of-scope boundaries.
 If Red Team or Reviewer findings are supplied, address exactly those findings.
-${beadsRoleGuidance("dev")}
+${externalMemoryRoleGuidance("dev")}
 ${contextEconomyPolicy("dev")}
 ${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
 ${stepResult.discovery?.handoff_path ? "Discovery did the broad map for this step. Target the files/symbols named in the Discovery handoff and avoid global rediscovery by default. You may verify source locally before edits." : "No Discovery handoff exists for this step; keep discovery proportional and explain any broad grep/read sweeps."}
@@ -858,12 +861,12 @@ ${step.prompt.dev}${redFindings ? `\n\nThe Red Team found these failures:\n${red
 
       if (step.phases.includes("redteam")) {
         const red = await agent(
-          withBeadsContext(`=== ADVERSARIAL RED TEAM: ${step.id} — ${step.title} (cycle ${cycle}) ===
+          withRuntimeContext(`=== ADVERSARIAL RED TEAM: ${step.id} — ${step.title} (cycle ${cycle}) ===
 You are the Red Team. Read the Developer implementation.
 Write adversarial WHITE BOX tests/spec checks designed to break it.
 Run relevant deterministic tests. Do not silently patch implementation.
 Report failures in structured form.
-${beadsRoleGuidance("redteam")}
+${externalMemoryRoleGuidance("redteam")}
 ${contextEconomyPolicy("redteam")}
 ${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
 Start from the current diff, Developer handoff, and targeted verification. Do not redo broad repo discovery unless necessary.
@@ -900,7 +903,7 @@ ${step.prompt.redteam}`, runtime),
     for (let attempt = 1; attempt <= reviewAttempts && !accepted; attempt++) {
       if (attempt > 1) {
         const fixImpl = await agent(
-          withBeadsContext(`=== DEVELOPER FIX PASS: ${step.id} — ${step.title} (review attempt ${attempt}) ===
+          withRuntimeContext(`=== DEVELOPER FIX PASS: ${step.id} — ${step.title} (review attempt ${attempt}) ===
 Implement only this sub-step and respect all invariants and boundaries.
 Address exactly these Code Reviewer findings:
 The findings block may also contain Objective Build Gate failures. Address both sources exactly.
@@ -934,7 +937,7 @@ ${step.prompt.dev}`, runtime),
       let review = null;
       if (step.phases.includes("review")) {
         review = await agent(
-          withBeadsContext(buildReviewerPrompt(step, gate, gateClean, handoffState), runtime),
+          withRuntimeContext(buildReviewerPrompt(step, gate, gateClean, handoffState), runtime),
           agentOptions({ label: `${step.id} review ${attempt}`, phase: step.id, model: step.model, effort: "high", schema: REVIEW_SCHEMA })
         );
         if (isCheckpoint(review)) return checkpointReturn(step, "review", review, STAGE, results);
@@ -972,7 +975,7 @@ ${step.prompt.dev}`, runtime),
         stepResult.commit = { status: "skipped", summary: "commit_mode none", commit_hash: null, commit_rc: 0, status_before: "", status_after: "", clean_after: true, notes: "" };
       } else {
         const commitResult = await agent(
-          withBeadsContext(commitAgentPrompt(step, commitPolicy, changed), runtime),
+          withRuntimeContext(commitAgentPrompt(step, commitPolicy, changed), runtime),
           agentOptions({ label: `${step.id} commit`, phase: step.id, model: commitPolicy.model, effort: commitPolicy.effort, schema: COMMIT_SCHEMA })
         );
         stepResult.commit = commitResult;
@@ -1010,10 +1013,10 @@ return result;
         }),
         "__STATIC_CONTEXT__": _json(static_context),
         "__DURABLE_CONTEXT__": _json(durable_context),
-        "__BEADS_CONFIG__": _json(beads_config),
+        "__EXTERNAL_MEMORY_CONFIG__": _json(external_memory_config),
         "__CONTEXT_ECONOMY__": _json(asdict(spec.context_economy)),
-        "__BEADS_CONTEXT_JS__": beads_context_js,
-        "__BEADS_ROLE_JS__": beads_role_js,
+        "__EXTERNAL_MEMORY_CONTEXT_JS__": external_memory_context_js,
+        "__EXTERNAL_MEMORY_ROLE_JS__": external_memory_role_js,
         "__STAGES__": _json(stages),
         "__MECHANICAL_PATHS_BRANCH__": '''  if (policy.mode === "mechanical_paths") {
     return `=== SAFE COMMIT AGENT: ${step.id} — ${step.title} ===
@@ -1021,7 +1024,7 @@ Commit only after accepted review. Run git status --short before and after stagi
 NEVER use git add -A. NEVER use git add . NEVER use git commit -a.
 Stage these explicit paths only:
 ${changed.length ? changed.map((path) => `  - ${path}`).join("\\n") : "  (none reported; do not create an empty commit)"}
-${beadsRoleGuidance("commit")}
+${externalMemoryRoleGuidance("commit")}
 Commit with: git commit -m ${shellQuote(message)}
 Return COMMIT_SCHEMA fields including commit_rc, status_after, and clean_after.`;
   }''' if uses_mechanical_paths else "",

@@ -47,15 +47,11 @@ commit:
     model: sonnet
     effort: low
 
-beads:
-  enabled: false
-  project_hint: my-refactor
-  require_before_edit: false
-  allow_create_issue: false
-  allow_remember: false
-  status_filter: open,in_progress,blocked,deferred,closed
-  before_edit_commands: []
-  remember_guidance: []
+external_memory:
+  mode: disabled
+  label: operator-notes
+  include_in_context_pack: false
+  include_in_agent_prompts: false
 
 discovery:
   enabled: false
@@ -137,9 +133,13 @@ Optional mapping of gate name to gate configuration. Omitting it preserves workf
 
 Optional top-level commit policy. Workflows that omit it use legacy `mechanical_paths`; all built-in templates emit an explicit `mechanical_all` policy.
 
+### `external_memory`
+
+Optional snapshot-only advisory memory. Missing config means disabled.
+
 ### `beads`
 
-Optional Beads prompt/context configuration. Missing config means disabled.
+Deprecated backward-compatibility mapping. `beads.enabled: false` is disabled. `beads.enabled: true` parses safely and maps to `external_memory.mode: snapshot`, but generated workflows do not emit live `bd` command guidance.
 
 ### `discovery`
 
@@ -242,24 +242,38 @@ steps:
 
 Unspecified override fields inherit from the top-level policy.
 
-## Beads reference
+## External memory and legacy Beads reference
+
+AIWK is Beads-blind by default. It does not require Beads or any external memory service.
+
+Preferred explicit snapshot-only config:
+
+```yaml
+external_memory:
+  mode: snapshot
+  label: operator-notes
+  include_in_context_pack: true
+  include_in_agent_prompts: true
+```
+
+Fields:
+
+| Field | Rules |
+| --- | --- |
+| `mode` | `disabled` or `snapshot`. |
+| `label` | Non-empty string for the advisory snapshot label. |
+| `include_in_context_pack` | Boolean. Currently context-pack includes a supplied snapshot only when the operator passes `--beads-snapshot-file`; this field documents intent for workflow projects. |
+| `include_in_agent_prompts` | Boolean. When true with `mode: snapshot`, generated prompts include a neutral optional snapshot section if runtime `beadsSnapshot` text is supplied. |
+
+Legacy config is accepted:
 
 ```yaml
 beads:
   enabled: true
   project_hint: service-refactor
-  require_before_edit: true
-  allow_create_issue: true
-  allow_remember: true
-  status_filter: open,in_progress,blocked,deferred,closed
-  before_edit_commands:
-    - bd prime || true
-    - bd list --status open,in_progress,blocked,deferred,closed || true
-  remember_guidance:
-    - Use bd remember for durable architecture decisions.
 ```
 
-All flags are booleans. `project_hint` and `status_filter` are strings. Command and guidance fields are lists of strings. This configuration changes generated prompt guidance; AIWK does not execute `bd` or automatically create/close issues.
+All legacy flags are still validated for old files, but live Beads guidance is not emitted. `beads.enabled: true` means snapshot-only advisory compatibility. Generated workflows must not tell agents to run `bd` commands or mutate Beads state.
 
 ## Discovery and context economy reference
 
