@@ -873,13 +873,16 @@ You are the OBJECTIVE BUILD GATE.
 You do not judge design, scope, or quality.
 Do not edit files.
 Run exactly this one AIWK command. Do not run the gate commands manually.
-Return the JSON it prints without changing exit codes, counts, paths, or raw_tail.
-Do not summarize instead of returning fields. If a command times out internally, return its timed_out and rc fields.
-If the command fails, return its JSON/error exactly and include evidence/log paths if present.
+
+This gate performs a clean build, full test suite, and clang-tidy over several packages and typically takes several minutes (up to ~10). Run it as a SINGLE FOREGROUND Bash call with an explicit long timeout (set timeout: 600000 — the 10-minute maximum — on the Bash call) so it completes within that one tool call and you receive its stdout directly. Do NOT run it in the background: a workflow subagent is NOT re-invoked on background-task completion, so a backgrounded gate would leave you polling an empty file until you are nudged and you would never return its result. Do not impose a shorter wall-clock cutoff of your own; the gate has its own internal per-section timeouts that govern real hangs, so honor those return codes. Only if the foreground Bash call itself reaches the 10-minute ceiling should you report that as a timeout (with the command's timed_out/rc if any) rather than guessing a result.
 
 \`\`\`sh
 ${command}
 \`\`\`
+
+When the command has finished, return the JSON object it printed to stdout, verbatim, without changing exit codes, counts, paths, or raw_tail.
+Do not summarize instead of returning fields. If a command times out internally, return its timed_out and rc fields.
+If the command fails, return its JSON/error exactly and include evidence/log paths if present.
 `;
 }
 
@@ -1195,7 +1198,7 @@ The findings block may also contain Objective Build Gate failures. Address both 
 ${priorReviewFindings}
 ${contextEconomyPolicy("dev_fix")}
 ${priorContextBlock(handoffState, priorReviewFindings)}
-${handoffInstructions(step, "DEVFIX", 0, attempt, continuation, `dev_fix_${attempt}_k${continuation}`)}
+${handoffInstructions(step, "DEV_FIX", 0, attempt, continuation, `dev_fix_${attempt}_k${continuation}`)}
 
 ${step.prompt.dev}`,
         });
@@ -1268,8 +1271,16 @@ ${step.prompt.dev}`,
         if (!commitResult || commitResult.status === "failed") {
           return { halted_at: `${step.id}:commit`, reason: "commit_failed", stage: STAGE, results };
         }
+        // Trust the agent's clean_after boolean (which it sets from `git status --short`)
+        // as the authoritative cleanliness signal. status_after is advisory context only:
+        // agents frequently return prose there ("clean; branch ... ahead by N") which is
+        // NOT dirtiness, so re-parsing it as a raw short-status string false-halts an
+        // actually-clean tree. Only fall back to the status_after string when the agent
+        // omitted clean_after entirely.
         const commitClean = ["committed", "nothing_to_commit", "skipped"].includes(commitResult.status) &&
-          commitResult.clean_after !== false && !String(commitResult.status_after || "").trim();
+          (typeof commitResult.clean_after === "boolean"
+            ? commitResult.clean_after === true
+            : !String(commitResult.status_after || "").trim());
         if (!commitClean) {
           return { halted_at: `${step.id}:commit`, reason: "commit_left_dirty_tree", stage: STAGE, results };
         }
