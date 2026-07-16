@@ -91,7 +91,7 @@ Give that prompt to the operator/coordinator responsible for collecting fresh pr
 3. Define objective gate commands that are deterministic in the target repository.
 4. Run `preflight` and resolve unrelated dirty files before launching a workflow.
 5. Render the workflow and syntax-check the generated JavaScript where Node is available.
-6. Launch the generated script through the Claude Workflow runtime with optional `stage`, `onlyStep`, `fromStep`, preflight, handoff, and explicit advisory external-memory snapshot context.
+6. Launch the generated script through the Claude Workflow runtime with optional `stage`, `onlyStep`, `fromStep`, `startAtRole`, preflight, handoff, and explicit advisory external-memory snapshot context.
 7. Inspect gate evidence and the final structured workflow result.
 8. Create a `context-pack` before a pause, handoff, or resume.
 
@@ -252,7 +252,7 @@ The standalone `aiwk checkpoint` command is separate from rendered commit policy
 Generated non-gate/non-commit agents must write a durable handoff before returning:
 
 ```text
-<project-folder>/state/handoffs/<STEP>_<ROLE>_C<CYCLE>_<AGENT_ID>.md
+<project-folder>/state/handoffs/<STEP>_<ROLE>_C<CYCLE>_A<ATTEMPT>_K<CONTINUATION>_<AGENT_ID>.md
 ```
 
 Their structured output includes `handoff_path`, changed/inspected files, tests run, known dirty paths, gate evidence pointers, and `next_agent_should_read`. The workflow threads those handoff paths into downstream prompts:
@@ -283,7 +283,7 @@ With Discovery enabled, generated routing becomes:
 Scope → Discovery → Developer → Red Team → Objective Gate → Reviewer → Commit
 ```
 
-Without Discovery, old workflows keep the normal mature route. Checkpointing is currently prompt-level: long agents are told to write a handoff and return `status:"checkpoint"`; the workflow surfaces a structured `checkpoint_requested` halt for a fresh continuation agent.
+Without Discovery, old workflows keep the normal mature route. Long agents are told to write a handoff and return `status:"checkpoint"`; generated routing reinvokes the same logical role/step with a new continuation handoff path until completion or the configured continuation limit.
 
 ## Operator context packs
 

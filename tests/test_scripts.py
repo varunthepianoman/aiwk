@@ -21,3 +21,11 @@ class ScriptTests(unittest.TestCase):
     def test_argument_wrappers(self):
         self.assertIn("--phase", script_text("context-pack", "aiwk.yaml"))
         self.assertIn("--step", script_text("checkpoint", "aiwk.yaml"))
+
+    def test_context_pack_forwards_extra_options(self):
+        text = script_text("context-pack", "aiwk.yaml")
+        # Must forward optional context-pack flags (e.g. --include-diff,
+        # --beads-snapshot-file) beyond the bare phase argument.
+        self.assertIn('"$@"', text)
+        # A leading --flag is passed straight through instead of being treated as a phase.
+        self.assertIn('if [ "${1#--}" != "$1" ]; then', text)

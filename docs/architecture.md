@@ -109,6 +109,8 @@ The reviewer cannot turn a red objective gate green. Its acceptance is necessary
 
 `stage` selects a stage or defaults to `meta.defaultStage`. `onlyStep` selects exactly one step; `fromStep` slices the selected stage from a recovery point. Both together are rejected.
 
+`startAtRole` is an intra-step fresh-launch entry point. It requires `onlyStep` plus durable evidence such as `handoffPath` or `gateEvidencePath`, then generated routing skips earlier roles inside the selected step. For example, `startAtRole: "review"` skips Scope/Discovery/Dev/Red Team, seeds handoff context, runs a fresh objective gate when configured, and invokes Reviewer. This is not Claude Workflow runtime-frame resume; AIWK does not recover old script variables across launches.
+
 Recovery is an operator decision. AIWK does not infer that an earlier step was accepted from Git history. Use handoff paths and explicit runtime arguments.
 
 ## Objective gate execution

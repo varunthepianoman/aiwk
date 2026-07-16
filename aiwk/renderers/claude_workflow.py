@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import asdict
 from pathlib import Path
 import sys
@@ -20,6 +21,21 @@ def _read_context_file(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return f"(missing: {path})"
+
+
+def _context_file(path: Path) -> str:
+    """Embed a durable-context file in full.
+
+    Durable spec/invariants/gates are the authoritative in-prompt context, so
+    they are embedded whole (no length bound); the sha256 is provenance only.
+    """
+    text = _beads_blind_text(_read_context_file(path))
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return (
+        f"Path: {path}\n"
+        f"sha256: {digest}\n\n"
+        f"{text}"
+    )
 
 
 def _beads_blind_text(text: str) -> str:
@@ -68,9 +84,9 @@ def render_claude_workflow(
         **{name: str(path) for name, path in context_paths.items()},
     }
     durable_context = {
-        "projectSpec": _beads_blind_text(_read_context_file(context_paths["projectSpecPath"])),
-        "invariants": _beads_blind_text(_read_context_file(context_paths["invariantsPath"])),
-        "gates": _beads_blind_text(_read_context_file(context_paths["gatesPath"])),
+        "projectSpec": _context_file(context_paths["projectSpecPath"]),
+        "invariants": _context_file(context_paths["invariantsPath"]),
+        "gates": _context_file(context_paths["gatesPath"]),
     }
     def rendered_gate(gate_name: str | None) -> dict[str, object] | None:
         if gate_name is None:
@@ -165,6 +181,7 @@ const CONTEXT_ECONOMY = __CONTEXT_ECONOMY__;
 const ALL_STEPS = __STAGES__;
 const MAX_DEV_RED_CYCLES = 2;
 const MAX_REVIEW_ATTEMPTS = 2;
+const MAX_CHECKPOINT_CONTINUATIONS = Number(CONTEXT_ECONOMY.max_checkpoint_continuations ?? 1);
 
 function normalizeWorkflowArgs(rawArgs) {
   if (rawArgs === undefined || rawArgs === null) return {};
@@ -428,45 +445,63 @@ function sanitizePathComponent(value) {
   return safe || "unknown";
 }
 
-function handoffPathFor(step, role, cycle, agentId) {
-  const filename = `${sanitizePathComponent(step.id)}_${sanitizePathComponent(role).toUpperCase()}_C${Number(cycle || 0)}_${sanitizePathComponent(agentId)}.md`;
+function handoffPathFor(step, role, cycle, attempt, continuation, agentId) {
+  const filename = `${sanitizePathComponent(step.id)}_${sanitizePathComponent(role).toUpperCase()}_C${Number(cycle || 0)}_A${Number(attempt || 0)}_K${Number(continuation || 0)}_${sanitizePathComponent(agentId)}.md`;
   return `${STATIC_CONTEXT.handoffsPath}/${filename}`;
 }
 
-function handoffTemplateText(step, role, cycle) {
-  return `# Handoff: ${step.id} ${role} cycle ${cycle}
+function handoffTemplateText(step, role, cycle, attempt, continuation) {
+  return `# Handoff: ${step.id} ${role} cycle ${cycle} attempt ${attempt} continuation ${continuation}
 
-## Verdict
+## Summary
 - status:
 - short verdict:
+
+## Role and step
+- role:
+- step:
+- cycle:
+- attempt:
+- continuation:
 
 ## Scope
 - allowed scope executed:
 - explicitly avoided non-goals:
 
-## Files changed / inspected
-### Changed
+## Files inspected
+- <path>:<line-range or symbol> — <why>
+
+## Files changed
 - <path> — <why>
 
-### Inspected but not changed
-- <path> — <why>
+## Important symbols or line ranges
+- <path>:<line-range> <symbol> — <finding/decision>
 
-## Tests / gates run
+## Commands and tests run
 - command:
 - rc:
 - result:
 - evidence path:
 
+## Gate evidence consulted
+- <path> — <what it showed>
+
 ## Findings closed
 - <finding id/name> — <resolution>
 
-## Remaining findings / risks
+## Known limitations
+- <limitation/risk> — <impact>
+
+## Remaining work
 - <severity> <description> <recommended next action>
 
-## Exact accepted paths / dirty tree
-- changed paths:
+## Recommended next reads
+- <handoff/log/source path>
+
+## Paths accepted or intentionally untouched
+- accepted changed paths:
+- intentionally untouched paths:
 - known dirty paths:
-- must be clean after commit:
 
 ## Next agent instructions
 - read this first;
@@ -492,29 +527,65 @@ function contextEconomyPolicy(role) {
 - ${CONTEXT_ECONOMY.require_handoff_before_checkpoint ? "A checkpoint is invalid without a written handoff_path." : "Prefer a written handoff_path before checkpointing."}`;
 }
 
-function priorContextBlock(priorHandoffPaths, gateEvidencePaths) {
-  const handoffs = uniqueNonEmpty(priorHandoffPaths);
-  const gates = uniqueNonEmpty(gateEvidencePaths);
+function testSummaryLines(testsRun) {
+  const tests = Array.isArray(testsRun) ? testsRun : [];
+  return tests.length ? tests.slice(-8).map((test) =>
+    `- ${test.command || "(unknown command)"} rc=${test.rc ?? "?"} result=${test.result || ""} evidence=${test.evidence_path || ""}`
+  ).join("\n") : "- (none reported yet)";
+}
+
+function priorContextBlock(state, findings = "") {
+  const handoffs = uniqueNonEmpty(state?.priorHandoffPaths || []);
+  const gates = uniqueNonEmpty(state?.gateEvidencePaths || []);
+  const changed = uniqueNonEmpty(state?.changedPaths || []);
+  const inspected = uniqueNonEmpty(state?.inspectedPaths || []);
+  const dirty = uniqueNonEmpty(state?.knownDirtyPaths || []);
   const handoffLines = handoffs.length ? handoffs.map((path) => `- ${path}`).join("\n") : "- (none yet)";
   const gateLines = gates.length ? gates.map((path) => `- ${path}`).join("\n") : "- (none yet)";
+  const changedLines = changed.length ? changed.map((path) => `- ${path}`).join("\n") : "- (none reported yet)";
+  const inspectedLines = inspected.length ? inspected.slice(-20).map((path) => `- ${path}`).join("\n") : "- (none reported yet)";
+  const dirtyLines = dirty.length ? dirty.map((path) => `- ${path}`).join("\n") : "- (none reported yet)";
   return `Prior handoff paths:
 ${handoffLines}
 
+Current changed paths reported by prior agents:
+${changedLines}
+
+Recently inspected paths reported by prior agents:
+${inspectedLines}
+
 Latest gate evidence/log paths:
 ${gateLines}
+
+Compact test summary from prior agents:
+${testSummaryLines(state?.testsRun)}
+
+Known dirty paths reported by prior agents:
+${dirtyLines}
+
+Allowed edit paths:
+- Prefer paths named in the current step prompt, prior handoffs, changed-path lists, and relevant spec/gate sections.
+- Broaden only when those paths are missing, stale, contradicted, or insufficient; state why.
+
+Forbidden scope:
+- Do not modify files outside this step's durable scope, unrelated generated artifacts, logs, transcripts, or build outputs.
+- Do not add generic whole-repository untracked-file policing.
+
+Specific findings being addressed:
+${findings || "- (none supplied)"}
 
 Read these first. Do not repeat broad repository discovery already summarized there unless the handoff is missing, stale, contradicted by source, or insufficient for the local task.
 If a handoff is contradicted by source, objective gate evidence, or committed specs, source/gates/specs win and you must explain the contradiction.`;
 }
 
-function handoffInstructions(step, role, cycle, agentId) {
-  const path = handoffPathFor(step, role, cycle, agentId);
+function handoffInstructions(step, role, cycle, attempt, continuation, agentId) {
+  const path = handoffPathFor(step, role, cycle, attempt, continuation, agentId);
   return `Durable handoff requirement:
 - Before returning, create the directory ${STATIC_CONTEXT.handoffsPath}.
 - Write this exact handoff markdown file: ${path}
 - Use this template and fill it concretely:
 
-${handoffTemplateText(step, role, cycle)}
+${handoffTemplateText(step, role, cycle, attempt, continuation)}
 
 - Return handoff_path exactly as: ${path}
 - Also return files_changed, files_inspected, tests_run, gate_evidence_paths, known_dirty_paths, and next_agent_should_read.
@@ -539,6 +610,22 @@ function rememberHandoff(state, output) {
     ...(state.priorHandoffPaths || []),
     ...collectHandoffPaths(output),
   ]);
+  state.changedPaths = uniqueNonEmpty([
+    ...(state.changedPaths || []),
+    ...(Array.isArray(output?.files_changed) ? output.files_changed : []),
+  ]);
+  state.inspectedPaths = uniqueNonEmpty([
+    ...(state.inspectedPaths || []),
+    ...(Array.isArray(output?.files_inspected) ? output.files_inspected : []),
+  ]);
+  state.knownDirtyPaths = uniqueNonEmpty([
+    ...(state.knownDirtyPaths || []),
+    ...(Array.isArray(output?.known_dirty_paths) ? output.known_dirty_paths : []),
+  ]);
+  state.testsRun = [
+    ...(Array.isArray(state.testsRun) ? state.testsRun : []),
+    ...(Array.isArray(output?.tests_run) ? output.tests_run : []),
+  ];
 }
 
 function rememberGateEvidence(state, gate) {
@@ -552,10 +639,15 @@ function isCheckpoint(output) {
   return output && output.status === "checkpoint";
 }
 
-function checkpointReturn(step, role, output, stage, results) {
+function validHandoffFor(output, expectedPath) {
+  if (!output || typeof output.handoff_path !== "string" || !output.handoff_path.trim()) return false;
+  return !expectedPath || output.handoff_path === expectedPath;
+}
+
+function checkpointReturn(step, role, output, stage, results, reason = "checkpoint_requested") {
   return {
     halted_at: `${step.id}:${role}_checkpoint`,
-    reason: "checkpoint_requested",
+    reason,
     checkpoint: {
       status: "checkpoint",
       handoff_path: output?.handoff_path || "",
@@ -571,6 +663,81 @@ function checkpointReturn(step, role, output, stage, results) {
 
 function missingHandoffReturn(step, role, stage, results) {
   return { halted_at: `${step.id}:${role}`, reason: "missing_handoff_path", stage, results };
+}
+
+function invalidHandoffReturn(step, role, expectedPath, actualPath, stage, results) {
+  return {
+    halted_at: `${step.id}:${role}`,
+    reason: "invalid_handoff_path",
+    expected_handoff_path: expectedPath,
+    actual_handoff_path: actualPath || "",
+    stage,
+    results,
+  };
+}
+
+function checkpointContinuationBlock(role, checkpointHandoffPath, remainingWork, continuation) {
+  if (!checkpointHandoffPath) return "";
+  const remaining = Array.isArray(remainingWork) ? remainingWork.join("\n- ") : String(remainingWork || "");
+  return `=== CHECKPOINT CONTINUATION ${continuation}: ${role} ===
+This is the same logical role and same step continuing after a checkpoint.
+Read this checkpoint handoff first: ${checkpointHandoffPath}
+Continue the remaining work before advancing workflow state:
+- ${remaining || "(remaining_work was empty; inspect the checkpoint handoff and finish the role)"}
+Do not consume a new Red-Team cycle or reset reviewer-attempt state because of this continuation.
+Write a new unique continuation handoff path for this invocation.`;
+}
+
+async function invokeSubstantiveRoleWithContinuations({
+  step, role, cycle = 0, attempt = 0, agentId, state, runtime, stage, results,
+  label, model, effort, schema, promptFor,
+}) {
+  let continuation = 0;
+  let checkpointHandoffPath = "";
+  let remainingWork = [];
+  while (continuation <= MAX_CHECKPOINT_CONTINUATIONS) {
+    const invocationId = `${agentId}_k${continuation}`;
+    const expectedHandoffPath = handoffPathFor(step, role, cycle, attempt, continuation, invocationId);
+    const prompt = promptFor({
+      continuation,
+      expectedHandoffPath,
+      checkpointHandoffPath,
+      remainingWork,
+      continuationBlock: checkpointContinuationBlock(role, checkpointHandoffPath, remainingWork, continuation),
+    });
+    const output = await agent(
+      withRuntimeContext(prompt, runtime),
+      agentOptions({ label: `${label} k${continuation}`, phase: step.id, model, effort, schema })
+    );
+    if (!output?.handoff_path) return { halt: missingHandoffReturn(step, role, stage, results) };
+    if (!validHandoffFor(output, expectedHandoffPath)) {
+      return { halt: invalidHandoffReturn(step, role, expectedHandoffPath, output?.handoff_path, stage, results) };
+    }
+    rememberHandoff(state, output);
+    if (isCheckpoint(output)) {
+      if (continuation >= MAX_CHECKPOINT_CONTINUATIONS) {
+        return { halt: checkpointReturn(step, role, output, stage, results, "checkpoint_continuation_limit_exceeded") };
+      }
+      state.checkpoints = [
+        ...(Array.isArray(state.checkpoints) ? state.checkpoints : []),
+        {
+          role,
+          step: step.id,
+          cycle,
+          attempt,
+          continuation,
+          handoff_path: output.handoff_path,
+          remaining_work: output.remaining_work || [],
+        },
+      ];
+      checkpointHandoffPath = output.handoff_path;
+      remainingWork = output.remaining_work || [];
+      continuation += 1;
+      continue;
+    }
+    return { output };
+  }
+  return { halt: { halted_at: `${step.id}:${role}_checkpoint`, reason: "checkpoint_continuation_limit_exceeded", stage, results } };
 }
 
 function withRuntimeContext(prompt, runtime) {
@@ -610,6 +777,73 @@ function selectSteps(stage, fromStep, onlyStep) {
     return selectedStage.steps.slice(index);
   }
   return selectedStage.steps;
+}
+
+const START_AT_ROLE_ORDER = {
+  scope: 10,
+  discovery: 20,
+  dev: 30,
+  redteam: 40,
+  gate: 50,
+  review: 60,
+  dev_fix: 70,
+  commit: 80,
+};
+
+function normalizeStartAtRole(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const text = String(value).trim().toLowerCase().replaceAll("-", "_");
+  const aliases = {
+    developer: "dev",
+    red_team: "redteam",
+    objective_gate: "gate",
+    reviewer: "review",
+    devfix: "dev_fix",
+    developer_fix: "dev_fix",
+  };
+  const role = aliases[text] || text;
+  if (!Object.prototype.hasOwnProperty.call(START_AT_ROLE_ORDER, role)) {
+    throw new Error(`unknown_startAtRole:${value}`);
+  }
+  return role;
+}
+
+function intArg(value, fallback, name) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number <= 0) throw new Error(`${name}_must_be_positive_integer`);
+  return number;
+}
+
+function roleRank(role) {
+  if (!role) return 0;
+  return START_AT_ROLE_ORDER[role] || 0;
+}
+
+function roleIsAtOrAfter(startAtRole, role) {
+  return !startAtRole || roleRank(role) >= roleRank(startAtRole);
+}
+
+function validateStartAtRoleArgs(startAtRole, onlyStep, handoffPath, gateEvidencePaths) {
+  if (!startAtRole) return null;
+  if (!onlyStep) return "startAtRole_requires_onlyStep";
+  if (startAtRole !== "scope" && !handoffPath && uniqueNonEmpty(gateEvidencePaths).length === 0) {
+    return "startAtRole_requires_handoffPath_or_gateEvidencePath";
+  }
+  return null;
+}
+
+function stepSupportsStartAtRole(step, role) {
+  if (!role) return true;
+  if (role === "discovery") return !!(step.discovery && step.discovery.enabled) || step.phases.includes("discovery");
+  if (role === "gate") return !!(step.objectiveGate && step.objectiveGate.enabled !== false);
+  if (role === "dev_fix") return step.phases.includes("review");
+  return step.phases.includes(role);
+}
+
+function validateStartAtRoleForStep(step, role) {
+  if (!role || stepSupportsStartAtRole(step, role)) return null;
+  return `startAtRole_${role}_not_available_for_step:${step.id}`;
 }
 
 function reviewAccepted(review) {
@@ -679,7 +913,7 @@ function computeGateClean(gate, gateConfig = null) {
          configuredChecksClean;
 }
 
-function buildReviewerPrompt(step, gate, gateClean, state) {
+function buildReviewerPrompt(step, gate, gateClean, state, attempt, continuation, agentId, findings = "") {
   return `=== Code Reviewer: ${step.id} — ${step.title} ===
 You are an adversarial Code Reviewer.
 A separate Objective Build Gate runs deterministic build/test/check commands.
@@ -692,14 +926,15 @@ Reject broad or fragile changes and stale assumptions.
 ${externalMemoryRoleGuidance("review")}
 
 Important review/commit ordering:
-This review runs before the Commit phase. Expected in-scope changes may be modified or untracked at review time. Do not reject solely because expected in-scope files are modified or untracked. Reject unrelated dirty files, generated workflow artifacts, logs, build outputs, transcripts, or scope creep. The Commit phase is responsible for explicit-path staging and final clean status.
+This review runs before the Commit phase. Expected in-scope changes may be modified or untracked at review time. Do not reject solely because expected in-scope files are modified or untracked. Reject unrelated dirty files, generated workflow artifacts, logs, build outputs, transcripts, or scope creep. The Commit phase is responsible for staging per the configured commit policy and for final clean status.
 If commit mode is mechanical_all, the Commit phase will run git add -A, so reject unrelated dirty files before accepting.
 Gate/review must confirm that git add -A is safe because the tree contains only accepted in-scope changes.
 
 ${contextEconomyPolicy("review")}
-${priorContextBlock(state.priorHandoffPaths, state.gateEvidencePaths)}
-Review from the current diff, prior handoffs, and gate evidence. Use targeted verification. Only rediscover broadly when necessary.
-${handoffInstructions(step, "REVIEW", 0, "review")}
+${priorContextBlock(state, findings)}
+Review the current repository diff, durable handoffs, changed paths, and fresh objective-gate evidence. Use targeted verification around concrete file, symbol, command, and evidence references. Only rediscover broadly when necessary and state why.
+Do not assume every reviewed change came solely from the latest Developer invocation; review current workflow state and evidence instead.
+${handoffInstructions(step, "REVIEW", 0, attempt, continuation, agentId)}
 
 Objective gate clean: ${gateClean}
 ${formatGateResult(gate)}
@@ -763,123 +998,167 @@ async function runWorkflow(rawArgs) {
   const STAGE = WORKFLOW_ARGS.stage || meta.defaultStage;
   const FROM_STEP = WORKFLOW_ARGS.fromStep || null;
   const ONLY_STEP = WORKFLOW_ARGS.onlyStep || null;
+  let START_AT_ROLE;
+  try { START_AT_ROLE = normalizeStartAtRole(WORKFLOW_ARGS.startAtRole || null); }
+  catch (error) { return { halted_at: "selection", reason: error.message, stage: STAGE, results: [] }; }
+  let RESUME_CYCLE;
+  let RESUME_ATTEMPT;
+  try {
+    RESUME_CYCLE = intArg(WORKFLOW_ARGS.resumeCycle, 1, "resumeCycle");
+    RESUME_ATTEMPT = intArg(WORKFLOW_ARGS.resumeAttempt, START_AT_ROLE === "dev_fix" ? 2 : 1, "resumeAttempt");
+  }
+  catch (error) { return { halted_at: "selection", reason: error.message, stage: STAGE, results: [] }; }
   const BACKCOMPAT_BEADS_SNAPSHOT = WORKFLOW_ARGS.beadsSnapshot || "";
   const PREFLIGHT_SUMMARY = WORKFLOW_ARGS.preflightSummary || "(no preflightSummary supplied)";
   const HANDOFF_PATH = WORKFLOW_ARGS.handoffPath || "";
+  const RESUME_GATE_EVIDENCE_PATHS = uniqueNonEmpty([
+    WORKFLOW_ARGS.gateEvidencePath,
+    ...(Array.isArray(WORKFLOW_ARGS.gateEvidencePaths) ? WORKFLOW_ARGS.gateEvidencePaths : []),
+  ]);
+  const RESUME_CHANGED_PATHS = uniqueNonEmpty([
+    ...(Array.isArray(WORKFLOW_ARGS.changedPaths) ? WORKFLOW_ARGS.changedPaths : []),
+    ...(Array.isArray(WORKFLOW_ARGS.resumeChangedPaths) ? WORKFLOW_ARGS.resumeChangedPaths : []),
+  ]);
+  const RESUME_FINDINGS = typeof WORKFLOW_ARGS.resumeFindings === "string" ? WORKFLOW_ARGS.resumeFindings : "";
   const runtime = { BACKCOMPAT_BEADS_SNAPSHOT, PREFLIGHT_SUMMARY, HANDOFF_PATH };
   const results = [];
   let steps;
+  const startAtRoleError = validateStartAtRoleArgs(START_AT_ROLE, ONLY_STEP, HANDOFF_PATH, RESUME_GATE_EVIDENCE_PATHS);
+  if (startAtRoleError) return { halted_at: "selection", reason: startAtRoleError, stage: STAGE, results };
   try { steps = selectSteps(STAGE, FROM_STEP, ONLY_STEP); }
   catch (error) { return { halted_at: "selection", reason: error.message, stage: STAGE, results }; }
 
   for (const step of steps) {
+    const startAtRoleStepError = validateStartAtRoleForStep(step, START_AT_ROLE);
+    if (startAtRoleStepError) return { halted_at: `${step.id}:selection`, reason: startAtRoleStepError, stage: STAGE, results };
     const handoffState = {
       priorHandoffPaths: uniqueNonEmpty([runtime.HANDOFF_PATH]),
-      gateEvidencePaths: [],
+      gateEvidencePaths: [...RESUME_GATE_EVIDENCE_PATHS],
+      changedPaths: [...RESUME_CHANGED_PATHS],
+      inspectedPaths: [],
+      knownDirtyPaths: [],
+      testsRun: [],
+      checkpoints: [],
     };
-    const stepResult = { step: step.id, scope: null, discovery: null, dev_cycles: [], review_attempts: [], impl: null, gate: null, gate_clean: true, review: null, commit: null };
+    const stepResult = { step: step.id, start_at_role: START_AT_ROLE, scope: null, discovery: null, dev_cycles: [], review_attempts: [], impl: null, gate: null, gate_clean: true, review: null, commit: null };
     results.push(stepResult);
 
-    if (step.phases.includes("scope")) {
-      const scope = await agent(
-        withRuntimeContext(`=== SCOPING TEST WRITER: ${step.id} — ${step.title} ===
+    if (step.phases.includes("scope") && roleIsAtOrAfter(START_AT_ROLE, "scope")) {
+      const scoped = await invokeSubstantiveRoleWithContinuations({
+        step, role: "scope", cycle: 0, attempt: 0, agentId: "scope",
+        state: handoffState, runtime, stage: STAGE, results,
+        label: `${step.id} scope`, model: step.model, effort: step.effort, schema: SCOPE_SCHEMA,
+        promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
+=== SCOPING TEST WRITER: ${step.id} — ${step.title} ===
 Write BLACK BOX tests/spec artifacts ONLY. No implementation code.
 Strictly follow the step scope.
 ${externalMemoryRoleGuidance("scope")}
 ${contextEconomyPolicy("scope")}
-${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
-${handoffInstructions(step, "SCOPE", 0, "scope")}
+${priorContextBlock(handoffState)}
+${handoffInstructions(step, "SCOPE", 0, 0, continuation, `scope_k${continuation}`)}
 
-${step.prompt.scope}`, runtime),
-        agentOptions({ label: `${step.id} scope`, phase: step.id, model: step.model, effort: step.effort, schema: SCOPE_SCHEMA })
-      );
+${step.prompt.scope}`,
+      });
+      if (scoped.halt) return scoped.halt;
+      const scope = scoped.output;
       stepResult.scope = scope;
-      if (isCheckpoint(scope)) return checkpointReturn(step, "scope", scope, STAGE, results);
-      if (!scope?.handoff_path) return missingHandoffReturn(step, "scope", STAGE, results);
-      rememberHandoff(handoffState, scope);
       if (!scope || scope.status !== "done" || scope.scope_ok !== true) {
         return { halted_at: `${step.id}:scope`, reason: scope?.status || "scope_rejected", stage: STAGE, results };
       }
     }
 
-    const discoveryEnabled = !!(step.discovery && step.discovery.enabled) || step.phases.includes("discovery");
+    const discoveryEnabled = (!!(step.discovery && step.discovery.enabled) || step.phases.includes("discovery")) && roleIsAtOrAfter(START_AT_ROLE, "discovery");
     if (discoveryEnabled) {
-      const discovery = await agent(
-        withRuntimeContext(`=== DISCOVERY AGENT: ${step.id} — ${step.title} ===
+      const discovered = await invokeSubstantiveRoleWithContinuations({
+        step, role: "discovery", cycle: 0, attempt: 0, agentId: "discovery",
+        state: handoffState, runtime, stage: STAGE, results,
+        label: `${step.id} discovery`, model: step.discovery?.model || step.model, effort: step.discovery?.effort || "high", schema: DISCOVERY_SCHEMA,
+        promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
+=== DISCOVERY AGENT: ${step.id} — ${step.title} ===
 You are the Discovery agent. Perform broad but bounded repository/source discovery for this step.
 Do not edit production code unless the workflow phase explicitly asks for edits. Your output is a compact repo map handoff for Developer.
 Identify exact files, symbols, tests, command entrypoints, and risks likely relevant to this step.
 Tell Developer what NOT to rediscover.
 ${contextEconomyPolicy("discovery")}
-${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
-${handoffInstructions(step, "DISCOVERY", 0, "discovery")}
+${priorContextBlock(handoffState)}
+${handoffInstructions(step, "DISCOVERY", 0, 0, continuation, `discovery_k${continuation}`)}
 
 Discovery task from workflow.yaml:
-${step.prompt.discovery || "Create a compact repo map for this step. Identify likely files/symbols/tests and boundaries; do not implement."}`, runtime),
-        agentOptions({ label: `${step.id} discovery`, phase: step.id, model: step.discovery?.model || step.model, effort: step.discovery?.effort || "high", schema: DISCOVERY_SCHEMA })
-      );
+${step.prompt.discovery || "Create a compact repo map for this step. Identify likely files/symbols/tests and boundaries; do not implement."}`,
+      });
+      if (discovered.halt) return discovered.halt;
+      const discovery = discovered.output;
       stepResult.discovery = discovery;
-      if (isCheckpoint(discovery)) return checkpointReturn(step, "discovery", discovery, STAGE, results);
-      if (!discovery?.handoff_path) return missingHandoffReturn(step, "discovery", STAGE, results);
-      rememberHandoff(handoffState, discovery);
       if (!discovery || discovery.status !== "done") {
         return { halted_at: `${step.id}:discovery`, reason: discovery?.status || "discovery_escalation", stage: STAGE, results };
       }
     }
 
     let lastImpl = null;
-    let redPassed = !(step.phases.includes("dev") || step.phases.includes("redteam"));
-    let redFindings = "";
+    const skipDevRedForStartRole = START_AT_ROLE && roleRank(START_AT_ROLE) > roleRank("redteam");
+    const devRedStartCycle = (START_AT_ROLE === "dev" || START_AT_ROLE === "redteam") ? RESUME_CYCLE : 1;
+    let redPassed = skipDevRedForStartRole || !(step.phases.includes("dev") || step.phases.includes("redteam"));
+    let redFindings = RESUME_FINDINGS;
     const redTestFiles = [];
     const devCycles = step.phases.includes("dev") ? MAX_DEV_RED_CYCLES : 1;
-    for (let cycle = 1; cycle <= devCycles && !redPassed; cycle++) {
-      if (step.phases.includes("dev")) {
-        const impl = await agent(
-          withRuntimeContext(`=== DEVELOPER: ${step.id} — ${step.title} (cycle ${cycle}) ===
+    for (let cycle = devRedStartCycle; cycle <= devCycles && !redPassed; cycle++) {
+      const skipInitialDevForRedteamEntry = START_AT_ROLE === "redteam" && cycle === devRedStartCycle;
+      const runDevThisCycle = step.phases.includes("dev") &&
+        !skipInitialDevForRedteamEntry &&
+        (!START_AT_ROLE || START_AT_ROLE === "dev" || START_AT_ROLE === "redteam" || roleIsAtOrAfter(START_AT_ROLE, "dev"));
+      const runRedThisCycle = step.phases.includes("redteam") &&
+        (!START_AT_ROLE || START_AT_ROLE === "dev" || START_AT_ROLE === "redteam" || roleIsAtOrAfter(START_AT_ROLE, "redteam"));
+      if (runDevThisCycle) {
+        const implemented = await invokeSubstantiveRoleWithContinuations({
+          step, role: "dev", cycle, attempt: 0, agentId: `dev_${cycle}`,
+          state: handoffState, runtime, stage: STAGE, results,
+          label: `${step.id} dev ${cycle}`, model: step.model, effort: step.effort, schema: IMPL_SCHEMA,
+          promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
+=== DEVELOPER: ${step.id} — ${step.title} (cycle ${cycle}) ===
 Implement only this sub-step. Pass the Scoping Tests.
 Respect invariants and out-of-scope boundaries.
 If Red Team or Reviewer findings are supplied, address exactly those findings.
 ${externalMemoryRoleGuidance("dev")}
 ${contextEconomyPolicy("dev")}
-${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
+${priorContextBlock(handoffState, redFindings)}
 ${stepResult.discovery?.handoff_path ? "Discovery did the broad map for this step. Target the files/symbols named in the Discovery handoff and avoid global rediscovery by default. You may verify source locally before edits." : "No Discovery handoff exists for this step; keep discovery proportional and explain any broad grep/read sweeps."}
-${handoffInstructions(step, "DEV", cycle, `dev_${cycle}`)}
+${handoffInstructions(step, "DEV", cycle, 0, continuation, `dev_${cycle}_k${continuation}`)}
 
-${step.prompt.dev}${redFindings ? `\n\nThe Red Team found these failures:\n${redFindings}` : ""}`, runtime),
-          agentOptions({ label: `${step.id} dev ${cycle}`, phase: step.id, model: step.model, effort: step.effort, schema: IMPL_SCHEMA })
-        );
+${step.prompt.dev}${redFindings ? `\n\nThe Red Team found these failures:\n${redFindings}` : ""}`,
+        });
+        if (implemented.halt) return implemented.halt;
+        const impl = implemented.output;
         lastImpl = impl;
         stepResult.impl = impl;
-        if (isCheckpoint(impl)) return checkpointReturn(step, "dev", impl, STAGE, results);
-        if (!impl?.handoff_path) return missingHandoffReturn(step, "dev", STAGE, results);
-        rememberHandoff(handoffState, impl);
         if (!impl || impl.status !== "done" || impl.scope_ok !== true) {
           stepResult.dev_cycles.push({ cycle, impl });
           return { halted_at: `${step.id}:dev`, reason: impl?.status || "implementer_escalation", stage: STAGE, results };
         }
       }
 
-      if (step.phases.includes("redteam")) {
-        const red = await agent(
-          withRuntimeContext(`=== ADVERSARIAL RED TEAM: ${step.id} — ${step.title} (cycle ${cycle}) ===
+      if (runRedThisCycle) {
+        const redTeamed = await invokeSubstantiveRoleWithContinuations({
+          step, role: "redteam", cycle, attempt: 0, agentId: `redteam_${cycle}`,
+          state: handoffState, runtime, stage: STAGE, results,
+          label: `${step.id} red team ${cycle}`, model: step.model, effort: "high", schema: RED_SCHEMA,
+          promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
+=== ADVERSARIAL RED TEAM: ${step.id} — ${step.title} (cycle ${cycle}) ===
 You are the Red Team. Read the Developer implementation.
 Write adversarial WHITE BOX tests/spec checks designed to break it.
 Run relevant deterministic tests. Do not silently patch implementation.
 Report failures in structured form.
 ${externalMemoryRoleGuidance("redteam")}
 ${contextEconomyPolicy("redteam")}
-${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
+${priorContextBlock(handoffState)}
 Start from the current diff, Developer handoff, and targeted verification. Do not redo broad repo discovery unless necessary.
-${handoffInstructions(step, "REDTEAM", cycle, `redteam_${cycle}`)}
+${handoffInstructions(step, "REDTEAM", cycle, 0, continuation, `redteam_${cycle}_k${continuation}`)}
 
-${step.prompt.redteam}`, runtime),
-          agentOptions({ label: `${step.id} red team ${cycle}`, phase: step.id, model: step.model, effort: "high", schema: RED_SCHEMA })
-        );
+${step.prompt.redteam}`,
+        });
+        if (redTeamed.halt) return redTeamed.halt;
+        const red = redTeamed.output;
         stepResult.dev_cycles.push({ cycle, impl: lastImpl, red });
         redTestFiles.push(...(red?.adversarial_tests_written || []));
-        if (isCheckpoint(red)) return checkpointReturn(step, "redteam", red, STAGE, results);
-        if (!red?.handoff_path) return missingHandoffReturn(step, "redteam", STAGE, results);
-        rememberHandoff(handoffState, red);
         if (!red || red.status === "blocked" || red.status === "needs_decision") {
           return { halted_at: `${step.id}:redteam`, reason: red?.status || "red_team_escalation", stage: STAGE, results };
         }
@@ -894,32 +1173,36 @@ ${step.prompt.redteam}`, runtime),
     }
 
     const gateEnabled = !!(step.objectiveGate && step.objectiveGate.enabled !== false);
-    let accepted = !(step.phases.includes("review") || gateEnabled);
-    let priorReviewFindings = "";
+    let accepted = START_AT_ROLE === "commit" ? true : !(step.phases.includes("review") || gateEnabled);
+    let priorReviewFindings = RESUME_FINDINGS;
     let lastReview = null;
     let lastGate = null;
     let lastGateClean = !gateEnabled;
-    const reviewAttempts = step.phases.includes("review") ? MAX_REVIEW_ATTEMPTS : 1;
-    for (let attempt = 1; attempt <= reviewAttempts && !accepted; attempt++) {
-      if (attempt > 1) {
-        const fixImpl = await agent(
-          withRuntimeContext(`=== DEVELOPER FIX PASS: ${step.id} — ${step.title} (review attempt ${attempt}) ===
+    const reviewStartAttempt = ["gate", "review", "dev_fix"].includes(START_AT_ROLE) ? RESUME_ATTEMPT : 1;
+    const reviewAttempts = step.phases.includes("review") ? Math.max(MAX_REVIEW_ATTEMPTS, reviewStartAttempt) : reviewStartAttempt;
+    for (let attempt = reviewStartAttempt; attempt <= reviewAttempts && !accepted; attempt++) {
+      const skipFixForDirectGateOrReviewEntry = ["gate", "review"].includes(START_AT_ROLE) && attempt === reviewStartAttempt;
+      if (attempt > 1 && !skipFixForDirectGateOrReviewEntry) {
+        const fixed = await invokeSubstantiveRoleWithContinuations({
+          step, role: "dev_fix", cycle: 0, attempt, agentId: `dev_fix_${attempt}`,
+          state: handoffState, runtime, stage: STAGE, results,
+          label: `${step.id} dev fix ${attempt}`, model: step.model, effort: step.effort, schema: IMPL_SCHEMA,
+          promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
+=== DEVELOPER FIX PASS: ${step.id} — ${step.title} (review attempt ${attempt}) ===
 Implement only this sub-step and respect all invariants and boundaries.
 Address exactly these Code Reviewer findings:
 The findings block may also contain Objective Build Gate failures. Address both sources exactly.
 ${priorReviewFindings}
 ${contextEconomyPolicy("dev_fix")}
-${priorContextBlock(handoffState.priorHandoffPaths, handoffState.gateEvidencePaths)}
-${handoffInstructions(step, "DEVFIX", attempt, `dev_fix_${attempt}`)}
+${priorContextBlock(handoffState, priorReviewFindings)}
+${handoffInstructions(step, "DEVFIX", 0, attempt, continuation, `dev_fix_${attempt}_k${continuation}`)}
 
-${step.prompt.dev}`, runtime),
-          agentOptions({ label: `${step.id} dev fix ${attempt}`, phase: step.id, model: step.model, effort: step.effort, schema: IMPL_SCHEMA })
-        );
+${step.prompt.dev}`,
+        });
+        if (fixed.halt) return fixed.halt;
+        const fixImpl = fixed.output;
         lastImpl = fixImpl;
         stepResult.impl = fixImpl;
-        if (isCheckpoint(fixImpl)) return checkpointReturn(step, "dev", fixImpl, STAGE, results);
-        if (!fixImpl?.handoff_path) return missingHandoffReturn(step, "dev_fix", STAGE, results);
-        rememberHandoff(handoffState, fixImpl);
         if (!fixImpl || fixImpl.status !== "done" || fixImpl.scope_ok !== true) {
           stepResult.review_attempts.push({ attempt, fix: fixImpl });
           return { halted_at: `${step.id}:review_fix`, reason: fixImpl?.status || "implementer_escalation", stage: STAGE, results };
@@ -936,13 +1219,15 @@ ${step.prompt.dev}`, runtime),
 
       let review = null;
       if (step.phases.includes("review")) {
-        review = await agent(
-          withRuntimeContext(buildReviewerPrompt(step, gate, gateClean, handoffState), runtime),
-          agentOptions({ label: `${step.id} review ${attempt}`, phase: step.id, model: step.model, effort: "high", schema: REVIEW_SCHEMA })
-        );
-        if (isCheckpoint(review)) return checkpointReturn(step, "review", review, STAGE, results);
-        if (!review?.handoff_path) return missingHandoffReturn(step, "review", STAGE, results);
-        rememberHandoff(handoffState, review);
+        const reviewed = await invokeSubstantiveRoleWithContinuations({
+          step, role: "review", cycle: 0, attempt, agentId: `review_${attempt}`,
+          state: handoffState, runtime, stage: STAGE, results,
+          label: `${step.id} review ${attempt}`, model: step.model, effort: "high", schema: REVIEW_SCHEMA,
+          promptFor: ({ continuation, continuationBlock }) =>
+            `${continuationBlock}\n${buildReviewerPrompt(step, gate, gateClean, handoffState, attempt, continuation, `review_${attempt}_k${continuation}`, priorReviewFindings)}`,
+        });
+        if (reviewed.halt) return reviewed.halt;
+        review = reviewed.output;
         accepted = gateClean && reviewAccepted(review);
       } else {
         accepted = gateClean;
@@ -964,11 +1249,12 @@ ${step.prompt.dev}`, runtime),
       return { halted_at: `${step.id}:review`, reason, stage: STAGE, results };
     }
 
-    if (step.phases.includes("commit")) {
+    if (step.phases.includes("commit") && roleIsAtOrAfter(START_AT_ROLE, "commit")) {
       const commitPolicy = commitPolicyForStep(step);
       const changed = Array.from(new Set([
         ...(lastImpl?.files_changed || []),
         ...(stepResult.scope?.test_files_written || []),
+        ...RESUME_CHANGED_PATHS,
         ...redTestFiles,
       ])).filter(Boolean);
       if (commitPolicy.mode === "none") {

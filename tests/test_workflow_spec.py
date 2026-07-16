@@ -20,6 +20,7 @@ class WorkflowSpecTests(unittest.TestCase):
         self.assertEqual(spec.stages["build"].steps[0].phases[-1], "commit")
         self.assertFalse(spec.discovery.enabled)
         self.assertEqual(spec.context_economy.max_tool_calls_before_checkpoint, 30)
+        self.assertEqual(spec.context_economy.max_checkpoint_continuations, 1)
 
     def test_missing_stages_fails(self):
         with self.assertRaisesRegex(ValueError, "stages"):
@@ -210,6 +211,7 @@ context_economy:
   max_tool_calls_before_checkpoint: 25
   checkpoint_after_major_test_milestone: true
   require_handoff_before_checkpoint: true
+  max_checkpoint_continuations: 2
 
 '''
         text = starter_workflow("demo").replace("stages:\n", block + "stages:\n", 1)
@@ -222,6 +224,7 @@ context_economy:
         self.assertTrue(spec.discovery.enabled)
         self.assertEqual(spec.discovery.model, "opus")
         self.assertEqual(spec.context_economy.max_tool_calls_before_checkpoint, 25)
+        self.assertEqual(spec.context_economy.max_checkpoint_continuations, 2)
         step = spec.stages["build"].steps[0]
         self.assertFalse(step.discovery.enabled)
         self.assertEqual(step.discovery.model, "sonnet")
@@ -241,6 +244,10 @@ context_economy:
         with self.assertRaisesRegex(ValueError, "positive integer"):
             load_workflow_spec(self.write(starter_workflow("demo").replace(
                 "stages:\n", "context_economy:\n  max_tool_calls_before_checkpoint: 0\n\nstages:\n", 1
+            )))
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            load_workflow_spec(self.write(starter_workflow("demo").replace(
+                "stages:\n", "context_economy:\n  max_checkpoint_continuations: -1\n\nstages:\n", 1
             )))
 
     def test_documented_example_workflows_parse(self):

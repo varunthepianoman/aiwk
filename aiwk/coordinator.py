@@ -34,13 +34,21 @@ def coordinator_prompt(
         stage_lines.append(f"- `{stage_name}`: " + ", ".join(f"`{step.id}`" for step in stage.steps))
     external_memory_value = ""
     external_memory_context_option = ""
+    external_memory_context_setup = ""
     external_memory_block = (
         "External memory is disabled. Use an empty `beadsSnapshot` compatibility argument. "
         "Do not require, invent, or mutate any external memory system."
     )
     if spec.external_memory.mode == "snapshot":
         external_memory_value = f"<optional exact contents of {external_memory_snapshot_path}>"
-        external_memory_context_option = f" --beads-snapshot-file {shlex.quote(str(external_memory_snapshot_path))}"
+        external_memory_context_setup = (
+            f'   SNAPSHOT={shlex.quote(str(external_memory_snapshot_path))}\n'
+            '   SNAPSHOT_ARG=""\n'
+            '   if [ -s "$SNAPSHOT" ]; then\n'
+            '     SNAPSHOT_ARG="--beads-snapshot-file $SNAPSHOT"\n'
+            '   fi\n'
+        )
+        external_memory_context_option = " $SNAPSHOT_ARG"
         external_memory_block = (
             "External memory snapshot mode is enabled. This is advisory and operator-supplied only.\n\n"
             f"If you have a relevant existing snapshot, write its exact contents to `{external_memory_snapshot_path}` and use that text as `beadsSnapshot`. "
@@ -52,8 +60,13 @@ def coordinator_prompt(
         "stage": default_stage,
         "fromStep": None,
         "onlyStep": None,
+        "startAtRole": None,
+        "resumeCycle": 1,
+        "resumeAttempt": 1,
         "preflightSummary": f"<replace with exact JSON from {preflight_path}>",
         "handoffPath": str(handoff_path),
+        "gateEvidencePath": None,
+        "resumeFindings": "",
         "beadsSnapshot": external_memory_value,
     }
     commit = spec.commit
@@ -112,6 +125,7 @@ Run these exact commands from any directory. Preserve their compact JSON output.
 4. Create a durable prestart context pack after operator context has been collected:
 
    ```bash
+{external_memory_context_setup}\
    {python} -m aiwk context-pack --config {config_arg} --phase COORDINATOR_PRESTART --include-diff --max-diff-lines 80{external_memory_context_option}
    ```
 
@@ -137,7 +151,17 @@ Launch the generated workflow at `{generated_js_path.resolve()}` with this argum
 {json.dumps(args, indent=2)}
 ```
 
-For a full run, leave `fromStep` and `onlyStep` null. To resume accepted work, set `fromStep` explicitly. To isolate one step, set `onlyStep` explicitly. Never set both. Do not infer a resume point without durable evidence that earlier steps were accepted.
+For a full run, leave `fromStep`, `onlyStep`, and `startAtRole` null. `fromStep` begins at the named step and continues through later steps. `onlyStep` runs only the selected step. `startAtRole` is a fresh-launch intra-step entry point and requires `onlyStep` plus durable evidence such as `handoffPath` or `gateEvidencePath`; it does not resume old workflow runtime memory. Never set both `fromStep` and `onlyStep`. Do not infer a resume point without durable evidence that earlier steps or roles were accepted.
+
+Useful intra-step examples:
+
+```json
+{{"stage":"{default_stage}","onlyStep":"{default_steps[0] if default_steps else '<STEP_ID>'}","startAtRole":"redteam","resumeCycle":1,"handoffPath":"<latest Developer handoff path>","preflightSummary":"<fresh preflight JSON>"}}
+```
+
+```json
+{{"stage":"{default_stage}","onlyStep":"{default_steps[0] if default_steps else '<STEP_ID>'}","startAtRole":"review","resumeAttempt":1,"handoffPath":"<latest Red Team or Developer handoff path>","gateEvidencePath":"<optional prior gate evidence path>","preflightSummary":"<fresh preflight JSON>"}}
+```
 
 ## Coordination and halt policy
 

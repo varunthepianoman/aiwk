@@ -2,6 +2,9 @@ from pathlib import Path
 import tempfile
 import unittest
 import sys
+import os
+import shutil
+import subprocess
 
 from aiwk.cli import initialize
 from aiwk.render import render
@@ -91,6 +94,23 @@ context_economy:
         )
         workflow_path.write_text(text, encoding="utf-8")
 
+    def test_durable_context_embedded_in_full(self):
+        # Durable spec/invariants/gates are authoritative in-prompt context and
+        # must embed whole -- no length bound. A file past the former 6000-char
+        # cap must appear in full, tail included, with no truncation marker.
+        spec_dir = self.project_root / "spec"
+        spec_dir.mkdir(parents=True, exist_ok=True)
+        marker = "UNIQUE_TAIL_MARKER_ZZ"
+        big = "invariants:\n" + "".join(
+            f"  - id: pad_{i}\n    rule: {'x' * 80}\n" for i in range(120)
+        ) + f"  - id: tail\n    rule: {marker}\n"
+        self.assertGreater(len(big), 6000)
+        (spec_dir / "invariants.yaml").write_text(big, encoding="utf-8")
+        result = render(self.config_path)
+        text = Path(result["output_path"]).read_text(encoding="utf-8")
+        self.assertIn(marker, text)
+        self.assertNotIn("[truncated", text)
+
     def test_default_render(self):
         result = render(self.config_path)
         output = self.project_root / "generated" / "demo.claude_workflow.js"
@@ -98,7 +118,7 @@ context_economy:
         text = output.read_text(encoding="utf-8")
         for expected in (
             "export const meta", "onlyStep", "fromStep", "preflightSummary",
-            "handoffPath", "beadsSnapshot", "DEMO_SS0", "TODO implement the scoped change.",
+            "handoffPath", "startAtRole", "beadsSnapshot", "DEMO_SS0", "TODO implement the scoped change.",
             "mechanical commit runner", "await agent(",
         ):
             self.assertIn(expected, text)
@@ -110,7 +130,7 @@ context_economy:
             "MAX_DEV_RED_CYCLES", "MAX_REVIEW_ATTEMPTS", "SCOPING TEST WRITER",
             "ADVERSARIAL RED TEAM", "DEVELOPER FIX PASS", "Code Reviewer",
             "commitAgentPrompt", "fromStep", "onlyStep", "beadsSnapshot",
-            "preflightSummary", "handoffPath", "commitAgentPrompt",
+            "preflightSummary", "handoffPath", "startAtRole", "commitAgentPrompt",
         ):
             with self.subTest(marker=expected):
                 self.assertIn(expected, text)
@@ -199,7 +219,7 @@ context_economy:
             "MAX_DEV_RED_CYCLES", "MAX_REVIEW_ATTEMPTS", "SCOPING TEST WRITER",
             "ADVERSARIAL RED TEAM", "DEVELOPER FIX PASS", "Code Reviewer",
             "commitAgentPrompt", "onlyStep", "fromStep", "beadsSnapshot",
-            "preflightSummary", "handoffPath",
+            "preflightSummary", "handoffPath", "startAtRole",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
@@ -210,6 +230,42 @@ context_economy:
         self.assertIn("if (!gateClean) findings.push(formatGateResult(gate))", text)
         self.assertIn("configuredChecksClean", text)
         self.assertIn('gate.status !== "ok"', text)
+
+    def test_start_at_role_fresh_entry_control_flow_renders(self):
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        for marker in (
+            "START_AT_ROLE = normalizeStartAtRole",
+            "startAtRole_requires_onlyStep",
+            "startAtRole_requires_handoffPath_or_gateEvidencePath",
+            "validateStartAtRoleForStep(step, START_AT_ROLE)",
+            "roleIsAtOrAfter(START_AT_ROLE, \"scope\")",
+            "roleIsAtOrAfter(START_AT_ROLE, \"discovery\")",
+            "skipInitialDevForRedteamEntry",
+            "START_AT_ROLE === \"redteam\"",
+            "skipFixForDirectGateOrReviewEntry",
+            "[\"gate\", \"review\"].includes(START_AT_ROLE)",
+            "START_AT_ROLE === \"commit\" ? true",
+            "roleIsAtOrAfter(START_AT_ROLE, \"commit\")",
+            "WORKFLOW_ARGS.gateEvidencePath",
+            "RESUME_CHANGED_PATHS",
+            "RESUME_FINDINGS",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_rendered_workflow_passes_available_javascript_syntax_check(self):
+        output = Path(render(self.config_path)["output_path"])
+        node = shutil.which("node")
+        code = Path("/usr/share/code/code")
+        if node:
+            command = [node, "--check", str(output)]
+            env = None
+        elif code.exists():
+            command = [str(code), "--check", str(output)]
+            env = {**os.environ, "ELECTRON_RUN_AS_NODE": "1"}
+        else:
+            self.skipTest("No node-compatible syntax checker available")
+        subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
 
     def test_rendered_objective_gate_is_enforced_before_review(self):
         self.add_objective_gate()
@@ -282,19 +338,84 @@ context_economy:
             "Durable handoff requirement:",
             "Write this exact handoff markdown file",
             "state/handoffs",
-            "rememberHandoff(handoffState, scope)",
-            "rememberHandoff(handoffState, impl)",
-            "rememberHandoff(handoffState, red)",
+            "invokeSubstantiveRoleWithContinuations",
+            "rememberHandoff(state, output)",
             "rememberGateEvidence(handoffState, gate)",
-            "buildReviewerPrompt(step, gate, gateClean, handoffState)",
+            "buildReviewerPrompt(step, gate, gateClean, handoffState, attempt, continuation",
             "checkpoint_requested",
+            "checkpoint_continuation_limit_exceeded",
             'status: "checkpoint"',
+            "validHandoffFor(output, expectedHandoffPath)",
+            "invalid_handoff_path",
+            "MAX_CHECKPOINT_CONTINUATIONS",
             "Context economy rule:",
             "Broad grep/find/read sweeps are allowed only if the handoff is missing",
             "tail -80",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
+
+    def test_unique_handoff_paths_include_role_cycle_attempt_and_continuation(self):
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        for marker in (
+            "_${sanitizePathComponent(role).toUpperCase()}_C${Number(cycle || 0)}_A${Number(attempt || 0)}_K${Number(continuation || 0)}_",
+            'role: "scope", cycle: 0, attempt: 0',
+            'role: "dev", cycle, attempt: 0',
+            'role: "redteam", cycle, attempt: 0',
+            'role: "dev_fix", cycle: 0, attempt',
+            'role: "review", cycle: 0, attempt',
+            "`dev_fix_${attempt}_k${continuation}`",
+            "`review_${attempt}_k${continuation}`",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_checkpoint_continuation_reinvokes_same_role(self):
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        for marker in (
+            "while (continuation <= MAX_CHECKPOINT_CONTINUATIONS)",
+            "checkpointHandoffPath = output.handoff_path",
+            "remainingWork = output.remaining_work || []",
+            "continuation += 1",
+            "continue;",
+            "This is the same logical role and same step continuing after a checkpoint",
+            "Do not consume a new Red-Team cycle or reset reviewer-attempt state",
+            "Write a new unique continuation handoff path",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_targeted_context_propagates_to_later_roles(self):
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        for marker in (
+            "Current changed paths reported by prior agents:",
+            "Compact test summary from prior agents:",
+            "Known dirty paths reported by prior agents:",
+            "Allowed edit paths:",
+            "Forbidden scope:",
+            "Specific findings being addressed:",
+            "priorContextBlock(handoffState, redFindings)",
+            "priorContextBlock(handoffState, priorReviewFindings)",
+            "priorContextBlock(state, findings)",
+            "gateEvidencePaths",
+            "changedPaths",
+            "testsRun",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_reviewer_prompt_uses_current_state_wording(self):
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        for marker in (
+            "Review the current repository diff, durable handoffs, changed paths, and fresh objective-gate evidence",
+            "Use targeted verification around concrete file, symbol, command, and evidence references",
+            "Do not assume every reviewed change came solely from the latest Developer invocation",
+            "Your acceptance is necessary but not sufficient",
+            "You cannot make a red build/test/check pass",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+        self.assertNotIn("uncommitted Developer diff", text)
 
     def test_discovery_enabled_renders_discovery_between_scope_and_dev(self):
         self.enable_discovery_and_context_economy()
@@ -327,6 +448,13 @@ context_economy:
         self.assertIn('status: "skipped", summary: "commit_mode none"', text)
 
     def test_beads_enabled_and_disabled_rendering(self):
+        workflow_path = self.project_root / "workflow.yaml"
+        workflow_path.write_text(
+            workflow_path.read_text(encoding="utf-8").replace(
+                "stages:\n", "beads:\n  enabled: false\n\nstages:\n", 1
+            ),
+            encoding="utf-8",
+        )
         disabled = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
         self.assertIn("beadsSnapshot", disabled)
         for forbidden in (

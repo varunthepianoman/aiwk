@@ -55,6 +55,7 @@ class ContextEconomyConfig:
     max_tool_calls_before_checkpoint: int = 30
     checkpoint_after_major_test_milestone: bool = True
     require_handoff_before_checkpoint: bool = True
+    max_checkpoint_continuations: int = 1
 
 
 @dataclass(frozen=True)
@@ -341,7 +342,13 @@ def _load_context_economy(raw: Any) -> ContextEconomyConfig:
     )
     if not isinstance(require_handoff, bool):
         raise ValueError("context_economy.require_handoff_before_checkpoint must be a boolean")
-    return ContextEconomyConfig(max_calls, checkpoint_after, require_handoff)
+    max_continuations = raw.get(
+        "max_checkpoint_continuations",
+        defaults.max_checkpoint_continuations,
+    )
+    if isinstance(max_continuations, bool) or not isinstance(max_continuations, int) or max_continuations < 0:
+        raise ValueError("context_economy.max_checkpoint_continuations must be a non-negative integer")
+    return ContextEconomyConfig(max_calls, checkpoint_after, require_handoff, max_continuations)
 
 
 def _load_beads(raw: Any) -> BeadsConfig:

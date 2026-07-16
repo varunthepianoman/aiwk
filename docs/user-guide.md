@@ -239,8 +239,13 @@ Supported runtime arguments:
 {
   "stage": "build",
   "onlyStep": "GENERIC_SS0",
+  "startAtRole": null,
+  "resumeCycle": 1,
+  "resumeAttempt": 1,
   "preflightSummary": "Use the latest AIWK preflight JSON.",
   "handoffPath": "/home/me/dev/.aiwk/my_refactor/state/PREVIOUS_handoff.md",
+  "gateEvidencePath": null,
+  "resumeFindings": "",
   "beadsSnapshot": "Optional advisory external-memory snapshot when explicitly enabled"
 }
 ```
@@ -251,6 +256,11 @@ Argument behavior:
 - `onlyStep`: runs exactly one step within the selected stage.
 - `fromStep`: skips earlier steps and resumes from the named step.
 - `onlyStep` and `fromStep` are mutually exclusive.
+- `startAtRole`: fresh-launch intra-step entry point. It requires `onlyStep` and durable evidence through `handoffPath` or `gateEvidencePath`; it does not resume old workflow runtime memory.
+- `resumeCycle`: development/red-team cycle to use with `startAtRole: "dev"` or `"redteam"`.
+- `resumeAttempt`: review/fix attempt to use with `startAtRole: "gate"`, `"review"`, or `"dev_fix"`.
+- `gateEvidencePath`: optional prior objective-gate evidence path to seed context. A fresh gate still runs before review when the selected role requires it.
+- `resumeFindings`: optional compact findings text for `dev`, `dev_fix`, or `review` entry.
 - `preflightSummary`: operator-provided deterministic context.
 - `handoffPath`: durable context the agents are instructed to read before editing.
 - `beadsSnapshot`: backward-compatible argument name for optional advisory external-memory snapshot text. It is ignored unless snapshot mode is explicitly enabled.
@@ -422,6 +432,35 @@ Use the `checkpoint.handoff_path` returned by the halted workflow:
 ```
 
 The continuation agent should read that handoff first, verify targeted files second, and avoid broad rediscovery unless the handoff is stale, contradicted, or insufficient.
+
+### Relaunch inside one step at Red Team or Reviewer
+
+Use `startAtRole` when prior durable handoffs prove that earlier roles in the step do not need to rerun. This starts a fresh workflow run at the chosen role; it does not recover old JavaScript variables or Claude runtime memory.
+
+```json
+{
+  "stage": "build",
+  "onlyStep": "GENERIC_SS1",
+  "startAtRole": "redteam",
+  "resumeCycle": 1,
+  "handoffPath": "/home/me/dev/.aiwk/my_refactor/state/handoffs/GENERIC_SS1_DEV_C1_A0_K0_dev_1_k0.md",
+  "preflightSummary": "..."
+}
+```
+
+```json
+{
+  "stage": "build",
+  "onlyStep": "GENERIC_SS1",
+  "startAtRole": "review",
+  "resumeAttempt": 1,
+  "handoffPath": "/home/me/dev/.aiwk/my_refactor/state/handoffs/GENERIC_SS1_REDTEAM_C1_A0_K0_redteam_1_k0.md",
+  "gateEvidencePath": "/home/me/dev/.aiwk/my_refactor/state/gates/latest.json",
+  "preflightSummary": "..."
+}
+```
+
+For `startAtRole: "review"`, AIWK skips Scope/Discovery/Dev/Red Team, seeds the reviewer with durable handoff context, runs a fresh objective gate when configured, then runs the reviewer. If gate/review fails, the normal Developer Fix → Gate → Review loop continues.
 
 ### Isolate one failing step
 
