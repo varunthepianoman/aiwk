@@ -20,7 +20,7 @@ AIWK does not replace the target repository or silently edit it during initializ
 - Deterministic objective-gate execution with timeouts, full logs, JSON evidence, Git snapshots, and SHA-256 integrity metadata.
 - Durable per-agent handoff files under `state/handoffs/`, with downstream agents instructed to read prior handoffs before broad rediscovery.
 - Optional Discovery agents for complex steps that need one bounded repo map before implementation.
-- Context-economy/checkpoint prompt policy for long agents.
+- Context-economy guidance for handoff-first, targeted agent work without forced tool-count checkpoints.
 - Configurable commit policies and post-commit clean-tree enforcement.
 - Beads-blind defaults: no tracker or external-memory system is required.
 - Rich context packs for cold starts, resumptions, and agent handoffs.
@@ -272,9 +272,7 @@ discovery:
   effort: high
 
 context_economy:
-  max_tool_calls_before_checkpoint: 30
-  checkpoint_after_major_test_milestone: true
-  require_handoff_before_checkpoint: true
+  max_checkpoint_continuations: 1
 ```
 
 With Discovery enabled, generated routing becomes:
@@ -283,7 +281,47 @@ With Discovery enabled, generated routing becomes:
 Scope → Discovery → Developer → Red Team → Objective Gate → Reviewer → Commit
 ```
 
-Without Discovery, old workflows keep the normal mature route. Long agents are told to write a handoff and return `status:"checkpoint"`; generated routing reinvokes the same logical role/step with a new continuation handoff path until completion or the configured continuation limit.
+Without Discovery, old workflows keep the normal mature route. Generated prompts no longer tell agents to checkpoint after a fixed tool-call count; prefer smaller workflow substeps when a role becomes too broad. If a role explicitly returns `status:"checkpoint"` anyway, generated routing reinvokes the same logical role/step with a new continuation handoff path until completion or the configured continuation limit.
+
+## Optional modules: code-review filter and fanned red team
+
+Two optional, placeable modules add to (never replace) the mature route. Both are OFF by default; when their config blocks are absent the generated workflow is byte-identical to before. Set them per step (or as a top-level default that steps override), like Discovery. See `examples/workflow_fan_redteam_and_code_review.yaml`.
+
+**Code-review filter (`code_review`).** A cheap `/code-review` pass on the diff, distinct from the holistic Reviewer. It catches diff-readable logic bugs (e.g. a fix that edits one branch and forgets another) for the cost of one pass, so the expensive red-team harness is reserved for behavioral/protocol/security defects that need runtime proof.
+
+```yaml
+code_review:
+  enabled: true
+  placement: pre_redteam   # post_dev | pre_redteam | final
+  effort: high             # low | medium | high | max
+  apply_fixes: false       # true -> invoke /code-review --fix
+  scope: diff              # diff | step
+```
+
+- `post_dev` / `pre_redteam` run it on the dev/fix diff **before** a red-team cycle is spent; a blocker/major finding short-circuits back to dev/fix so the red team only sees a clean diff. Minor findings are advisory.
+- `final` runs one comprehensive audit of the accepted diff just before commit; a blocking finding halts the step for a human decision (it does not loop).
+- Requires a `dev` phase in the step (nothing to review otherwise).
+
+**Fanned red team (`redteam_fan`).** Replaces the single red-team agent with N blindered attack-lens agents run in parallel, each finding adversarially verified before it is reported. Diversity of mandate collapses many serial red-team cycles into one round. Lenses are author-designed in advance, ideally one per authoritative-spec scenario cluster.
+
+```yaml
+redteam_fan:
+  enabled: true
+  verify: true             # adversarially verify each finding
+  verify_votes: 3          # refuters per finding; survives if < majority refute
+  model: opus
+  effort: high
+  completeness_critic: false  # advisory: names surfaces no lens covered
+  lenses:
+    - key: payload-bound
+      prompt: "Attack the receive-boundary payload limit ... cite the spec."
+    - key: fault-drop
+      prompt: "Attack connection disposition after a framing fault ..."
+```
+
+- Requires a `redteam` phase; `enabled` needs at least two lenses (a fan of one is just the single agent).
+- Findings aggregate into the **same** red-team findings report, so cycle/convergence routing is unchanged.
+- The optional completeness critic only *reports* uncovered surfaces and suggested lens keys; the workflow never auto-adds lenses.
 
 ## Operator context packs
 
@@ -334,7 +372,8 @@ Snapshot mode includes only a compact advisory section when the operator supplie
 - [Workflow reference](docs/workflow-reference.md): complete supported `workflow.yaml` schema and examples.
 - [Architecture](docs/architecture.md): execution model, trust boundaries, generated control flow, and evidence model.
 - [Handoff/context-economy implementation map](docs/aiwk_handoff_context_economy_plan.md): source/test map and current limitations.
-- [Examples](examples/): simple workflow and Discovery/context-economy workflow snippets.
+- [Examples](examples/): simple workflow, Discovery/context-economy, and the code-review + fanned-red-team modules (`workflow_fan_redteam_and_code_review.yaml`).
+- [Fan red team and code-review modules](docs/fan_redteam_and_code_review.md): design and placement of the two optional modules.
 - [Runtime validation](testing_infra/aiwk_claude_runtime_validation_instructions.md): disposable end-to-end Claude Workflow validation.
 
 Historical implementation prompts remain under `docs/`; they describe development phases, not the current user interface.

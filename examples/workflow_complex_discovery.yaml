@@ -8,9 +8,7 @@ discovery:
   effort: high
 
 context_economy:
-  max_tool_calls_before_checkpoint: 30
-  checkpoint_after_major_test_milestone: true
-  require_handoff_before_checkpoint: true
+  max_checkpoint_continuations: 1
 
 commit:
   mode: mechanical_all

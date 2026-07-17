@@ -89,9 +89,7 @@ discovery:
   effort: high
 
 context_economy:
-  max_tool_calls_before_checkpoint: 30
-  checkpoint_after_major_test_milestone: true
-  require_handoff_before_checkpoint: true
+  max_checkpoint_continuations: 1
 ```
 
 Steps may override Discovery:
@@ -116,7 +114,7 @@ An explicit `discovery` phase also enables Discovery for that step.
 
 ## Checkpoint limitation
 
-Generated JS cannot reliably count model-internal tool calls. Checkpointing is prompt-level plus structured surfacing: long agents are told to write a handoff and return `status: "checkpoint"`, and the workflow returns a structured `checkpoint_requested` halt for the operator to continue with a fresh agent using that handoff.
+Generated JS cannot reliably count model-internal tool calls, so AIWK no longer tells agents to checkpoint after a fixed tool-call count or major test milestone. If a role explicitly returns `status: "checkpoint"` anyway, generated routing continues the same logical role/step with the checkpoint handoff and remaining work until completion or the configured continuation limit.
 
 ## Audit traceability
 
@@ -126,7 +124,7 @@ Generated JS cannot reliably count model-internal tool calls. Checkpointing is p
 | Later agents saw `Handoff path supplied by operator: (none)`. | Generated workflow tracks prior `handoff_path` values and injects `Prior handoff paths:` into downstream prompts. | Implemented. |
 | Gate evidence existed but was not always passed as typed downstream input. | Generated workflow tracks `evidence_path`/`log_path` and includes latest gate evidence paths in review/fix prompts. | Implemented. |
 | Explicit-path commit staging missed accepted files. | `mechanical_all` now uses `git add -A` only after review/gate acceptance and requires clean final status. | Implemented as Option A, not audit's exact-path alternative. |
-| Long developer agents caused huge cache reads. | Context-economy prompts require handoff-first work, bounded output, and checkpoint status after large tool/test milestones. | Prompt-level implemented; hard tool-call counting remains unsupported. |
+| Long developer agents caused huge cache reads. | Current policy favors smaller workflow substeps and handoff-first targeted work; generated prompts no longer force checkpoint exits based on tool-count growth. | Updated after operator feedback. |
 | Full specs were re-inlined repeatedly. | Current renderer still embeds durable spec/invariant/gate contents in generated JS and prompts agents to read durable paths. | Not fully solved; future pass can move to path + excerpt/minimized context mode. |
 
 ## Risks

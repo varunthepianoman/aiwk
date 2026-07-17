@@ -1,0 +1,70 @@
+project: fan_and_code_review_example
+description: "Optional placeable modules: a cheap /code-review filter before the red-team round, and a fanned parallel-lens red team with adversarial verification. Both opt-in; absent blocks change nothing."
+default_stage: build
+
+commit:
+  mode: mechanical_all
+  message_template: "{step_id}: {step_title}"
+  agent:
+    model: sonnet
+    effort: low
+
+# Top-level defaults may set either module; per-step blocks override. Here the
+# defaults stay OFF and both modules are enabled only on the step below.
+
+stages:
+  build:
+    description: Scope, implement, filter-review, fan-red-team, review, commit.
+    steps:
+      - id: DATAPLANE_SS2
+        title: Data-plane framing/session hardening
+        model: sonnet
+        effort: medium
+        phases:
+          - scope
+          - dev
+          - redteam
+          - review
+          - commit
+
+        # MODULE 1 -- cheap /code-review filter.
+        # placement pre_redteam runs it on the dev/fix diff BEFORE a red-team
+        # cycle is spent. A blocker/major finding short-circuits back to dev/fix,
+        # so the expensive red-team harness only sees a clean diff. Minor findings
+        # are advisory. Use placement final for one comprehensive audit of the
+        # accepted diff just before commit instead.
+        code_review:
+          enabled: true
+          placement: pre_redteam
+          effort: high
+          apply_fixes: false
+          scope: diff
+
+        # MODULE 2 -- fanned red team. Each lens is a blindered attacker that
+        # attacks ONLY its surface; running them in parallel collapses many serial
+        # red-team cycles into one round. Every finding is verified by verify_votes
+        # independent refuters and survives only if fewer than a majority refute
+        # it. Lenses are author-designed in advance, ideally one per spec-scenario
+        # cluster.
+        redteam_fan:
+          enabled: true
+          verify: true
+          verify_votes: 3
+          model: opus
+          effort: high
+          completeness_critic: true
+          lenses:
+            - key: payload-bound
+              prompt: "Attack the receive-boundary payload limit: oversized/negative/non-word-aligned payload_length, unbounded allocation, DoS. Cite the Data Plane Spec and write a deterministic repro."
+            - key: fault-drop
+              prompt: "Attack connection disposition after a framing fault (bad magic, malformed frame): must the connection drop per Scenario 2? Find keep-open desync."
+            - key: session-teardown
+              prompt: "Attack session-state teardown on fd drop/disconnect: is_established() vs is_client_connected() consistency, spin hazards (Scenario 6)."
+            - key: serialized-txn
+              prompt: "Attack the strictly-serialized transactions (send_ping): ACK timeout, wrong-type ACK, write-failure branches. Must close per Scenario 4."
+
+        prompt:
+          scope: Pin black-box framing/session behavior with deterministic tests.
+          dev: Implement only the scoped framing/session hardening.
+          redteam: "Base mandate appended to each lens: challenge the framing and session-state boundaries; never patch the implementation."
+          review: Require deterministic tests and a narrow boundary.

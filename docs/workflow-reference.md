@@ -59,9 +59,7 @@ discovery:
   effort: high
 
 context_economy:
-  max_tool_calls_before_checkpoint: 30
-  checkpoint_after_major_test_milestone: true
-  require_handoff_before_checkpoint: true
+  max_checkpoint_continuations: 1
 
 objective_gates:
   default:
@@ -147,7 +145,7 @@ Optional Discovery-agent default. Missing config means disabled. A step may over
 
 ### `context_economy`
 
-Optional prompt/checkpoint policy. Missing config uses safe defaults. Generated JS surfaces checkpoint requests but does not hard-count provider tool calls.
+Optional explicit checkpoint-continuation policy. Missing config uses safe defaults. Generated JS surfaces checkpoint requests but does not hard-count provider tool calls or tell agents to exit at a fixed call count.
 
 ### `stages`
 
@@ -303,20 +301,19 @@ Context economy:
 
 ```yaml
 context_economy:
-  max_tool_calls_before_checkpoint: 30
-  checkpoint_after_major_test_milestone: true
-  require_handoff_before_checkpoint: true
+  max_checkpoint_continuations: 1
 ```
 
 Fields:
 
 | Field | Type/default | Meaning |
 | --- | --- | --- |
-| `max_tool_calls_before_checkpoint` | positive integer, `30` | Soft prompt budget for long agents. |
-| `checkpoint_after_major_test_milestone` | boolean, `true` | Tell long agents to stop after major compile/test milestones instead of growing one transcript. |
-| `require_handoff_before_checkpoint` | boolean, `true` | Require a written `handoff_path` before returning `status: "checkpoint"`. |
+| `max_checkpoint_continuations` | non-negative integer, `1` | Maximum same-role continuations if a role explicitly returns `status: "checkpoint"`. |
+| `max_tool_calls_before_checkpoint` | positive integer, deprecated | Backward-compatible parse-only field. Generated prompts no longer use tool-count checkpoint guidance. |
+| `checkpoint_after_major_test_milestone` | boolean, deprecated | Backward-compatible parse-only field. Generated prompts no longer tell agents to stop after compile/test milestones. |
+| `require_handoff_before_checkpoint` | boolean, deprecated | Backward-compatible parse-only field. Handoffs remain required for substantive role completion. |
 
-Checkpointing is prompt-level in Pass 1 of this feature: the generated workflow cannot observe internal tool-call counts, but it does return a structured `checkpoint_requested` halt when an agent returns checkpoint status.
+Checkpointing is explicit, not automatic. The generated workflow cannot observe internal tool-call counts, and generated prompts no longer tell agents to checkpoint after a fixed number of calls. If an agent returns checkpoint status anyway, generated routing continues the same logical role/step with the checkpoint handoff until completion or the continuation limit.
 
 ## Stage and step reference
 

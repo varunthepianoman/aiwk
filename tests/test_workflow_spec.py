@@ -257,3 +257,117 @@ context_economy:
         self.assertFalse(simple.stages["build"].steps[0].discovery.enabled)
         self.assertTrue(complex_spec.stages["build"].steps[0].discovery.enabled)
         self.assertEqual(complex_spec.commit.mode, "mechanical_all")
+
+    def test_modules_example_workflow_parses(self):
+        repo = Path(__file__).resolve().parents[1]
+        spec = load_workflow_spec(repo / "examples" / "workflow_fan_redteam_and_code_review.yaml")
+        step = spec.stages["build"].steps[0]
+        self.assertTrue(step.code_review.enabled)
+        self.assertEqual(step.code_review.placement, "pre_redteam")
+        self.assertTrue(step.redteam_fan.enabled)
+        self.assertEqual([lens.key for lens in step.redteam_fan.lenses],
+                         ["payload-bound", "fault-drop", "session-teardown", "serialized-txn"])
+        self.assertEqual(step.redteam_fan.verify_votes, 3)
+
+    # --- code_review module ---
+
+    def test_code_review_defaults_disabled(self):
+        spec = load_workflow_spec(self.write(starter_workflow("demo")))
+        self.assertFalse(spec.code_review.enabled)
+        step = spec.stages["build"].steps[0]
+        self.assertFalse(step.code_review.enabled)
+        self.assertEqual(step.code_review.placement, "post_dev")
+        self.assertEqual(step.code_review.scope, "diff")
+
+    def test_code_review_top_level_and_step_override_parse(self):
+        block = "code_review:\n  enabled: true\n  placement: final\n  effort: max\n\n"
+        text = starter_workflow("demo").replace("stages:\n", block + "stages:\n", 1)
+        text = text.replace(
+            "        phases:\n",
+            "        code_review:\n          enabled: true\n          placement: pre_redteam\n          apply_fixes: true\n          scope: step\n        phases:\n",
+            1,
+        )
+        spec = load_workflow_spec(self.write(text))
+        self.assertEqual(spec.code_review.placement, "final")
+        self.assertEqual(spec.code_review.effort, "max")
+        step = spec.stages["build"].steps[0]
+        self.assertEqual(step.code_review.placement, "pre_redteam")
+        self.assertTrue(step.code_review.apply_fixes)
+        self.assertEqual(step.code_review.scope, "step")
+
+    def test_code_review_invalid_enum_values_fail(self):
+        for block, pattern in [
+            ("code_review:\n  enabled: true\n  placement: someday\n\n", "placement must be one of"),
+            ("code_review:\n  enabled: true\n  effort: extreme\n\n", "effort must be one of"),
+            ("code_review:\n  enabled: true\n  scope: everything\n\n", "scope must be one of"),
+        ]:
+            with self.assertRaisesRegex(ValueError, pattern):
+                load_workflow_spec(self.write(starter_workflow("demo").replace("stages:\n", block + "stages:\n", 1)))
+
+    def test_code_review_requires_dev_phase(self):
+        text = starter_workflow("demo").replace(
+            "        phases:\n          - scope\n          - dev\n",
+            "        code_review:\n          enabled: true\n        phases:\n          - scope\n",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "code_review.enabled requires a 'dev' phase"):
+            load_workflow_spec(self.write(text))
+
+    # --- redteam_fan module ---
+
+    def test_redteam_fan_defaults_disabled(self):
+        spec = load_workflow_spec(self.write(starter_workflow("demo")))
+        self.assertFalse(spec.redteam_fan.enabled)
+        step = spec.stages["build"].steps[0]
+        self.assertFalse(step.redteam_fan.enabled)
+        self.assertEqual(step.redteam_fan.verify_votes, 1)
+        self.assertEqual(step.redteam_fan.lenses, ())
+
+    def test_redteam_fan_step_config_parses(self):
+        fan = ("        redteam_fan:\n          enabled: true\n          verify_votes: 3\n"
+               "          completeness_critic: true\n          lenses:\n"
+               "            - key: lens-a\n              prompt: attack a\n"
+               "            - key: lens-b\n              prompt: attack b\n")
+        text = starter_workflow("demo").replace("        phases:\n", fan + "        phases:\n", 1)
+        spec = load_workflow_spec(self.write(text))
+        step = spec.stages["build"].steps[0]
+        self.assertTrue(step.redteam_fan.enabled)
+        self.assertEqual(step.redteam_fan.verify_votes, 3)
+        self.assertTrue(step.redteam_fan.completeness_critic)
+        self.assertEqual([lens.key for lens in step.redteam_fan.lenses], ["lens-a", "lens-b"])
+
+    def test_redteam_fan_requires_two_lenses_when_enabled(self):
+        fan = ("        redteam_fan:\n          enabled: true\n          lenses:\n"
+               "            - key: only-one\n              prompt: attack\n")
+        text = starter_workflow("demo").replace("        phases:\n", fan + "        phases:\n", 1)
+        with self.assertRaisesRegex(ValueError, "requires at least 2 lenses"):
+            load_workflow_spec(self.write(text))
+
+    def test_redteam_fan_duplicate_lens_key_fails(self):
+        fan = ("        redteam_fan:\n          enabled: true\n          lenses:\n"
+               "            - key: dup\n              prompt: a\n"
+               "            - key: dup\n              prompt: b\n")
+        text = starter_workflow("demo").replace("        phases:\n", fan + "        phases:\n", 1)
+        with self.assertRaisesRegex(ValueError, "duplicate key 'dup'"):
+            load_workflow_spec(self.write(text))
+
+    def test_redteam_fan_invalid_verify_votes_fails(self):
+        fan = ("        redteam_fan:\n          enabled: true\n          verify_votes: 0\n          lenses:\n"
+               "            - key: a\n              prompt: a\n"
+               "            - key: b\n              prompt: b\n")
+        text = starter_workflow("demo").replace("        phases:\n", fan + "        phases:\n", 1)
+        with self.assertRaisesRegex(ValueError, "verify_votes must be a positive integer"):
+            load_workflow_spec(self.write(text))
+
+    def test_redteam_fan_requires_redteam_phase(self):
+        # A step with dev but no redteam phase cannot enable the fan.
+        fan = ("        redteam_fan:\n          enabled: true\n          lenses:\n"
+               "            - key: a\n              prompt: a\n"
+               "            - key: b\n              prompt: b\n")
+        text = starter_workflow("demo").replace(
+            "        phases:\n          - scope\n          - dev\n          - redteam\n",
+            fan + "        phases:\n          - scope\n          - dev\n",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "redteam_fan.enabled requires a 'redteam' phase"):
+            load_workflow_spec(self.write(text))

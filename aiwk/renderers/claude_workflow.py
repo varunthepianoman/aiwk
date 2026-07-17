@@ -121,6 +121,28 @@ def render_claude_workflow(
             "effort": step.discovery.effort,
         }
 
+    def rendered_code_review(step) -> dict[str, object]:
+        cr = step.code_review
+        return {
+            "enabled": cr.enabled,
+            "placement": cr.placement,
+            "effort": cr.effort,
+            "applyFixes": cr.apply_fixes,
+            "scope": cr.scope,
+        }
+
+    def rendered_redteam_fan(step) -> dict[str, object]:
+        fan = step.redteam_fan
+        return {
+            "enabled": fan.enabled,
+            "verify": fan.verify,
+            "verifyVotes": fan.verify_votes,
+            "model": fan.model,
+            "effort": fan.effort,
+            "completenessCritic": fan.completeness_critic,
+            "lenses": [{"key": lens.key, "prompt": lens.prompt} for lens in fan.lenses],
+        }
+
     stages = {
         name: {
             "description": stage.description,
@@ -135,6 +157,8 @@ def render_claude_workflow(
                     "objectiveGate": rendered_gate(step.objective_gate),
                     "commitPolicy": rendered_commit(step),
                     "discovery": rendered_discovery(step),
+                    "codeReview": rendered_code_review(step),
+                    "redteamFan": rendered_redteam_fan(step),
                     "stage": name,
                 }
                 for step in stage.steps
@@ -342,6 +366,60 @@ const REVIEW_SCHEMA = {
   },
 };
 
+// Per-finding verdict returned by an adversarial refuter in the fanned red-team
+// verify stage. `real` false means the refuter believes the finding is not a
+// genuine defect. Refuters are prompted to default to refuted when uncertain.
+const FAN_VERDICT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["real", "reason"],
+  properties: {
+    real: { type: "boolean" },
+    reason: { type: "string" },
+  },
+};
+
+// Optional completeness critic: names attack surfaces no lens covered. Advisory
+// only -- the workflow never auto-adds lenses; it surfaces the gap for the author.
+const FAN_CRITIC_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["uncovered_surfaces", "suggested_lenses", "notes"],
+  properties: {
+    uncovered_surfaces: { type: "array", items: { type: "string" } },
+    suggested_lenses: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["key", "rationale"],
+        properties: { key: { type: "string" }, rationale: { type: "string" } },
+      },
+    },
+    notes: { type: "string" },
+  },
+};
+
+// Cheap /code-review filter report. Distinct from REVIEW_SCHEMA (the holistic
+// reviewer): this is the machine-readable result of the /code-review skill run
+// on the diff, so the workflow can route a blocking finding back to dev/fix.
+const CODE_REVIEW_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["status", "placement", "clean", "findings", "fixes_applied", "summary", "handoff", ...HANDOFF_REQUIRED],
+  properties: {
+    status: { type: "string", enum: ["done", "blocked", "needs_decision", "checkpoint"] },
+    placement: { type: "string", enum: ["post_dev", "pre_redteam", "final"] },
+    clean: { type: "boolean" },
+    findings: { type: "array", items: { type: "object", additionalProperties: false, required: ["severity", "detail"], properties: { severity: { type: "string", enum: ["blocker", "major", "minor"] }, file: { type: "string" }, detail: { type: "string" } } } },
+    fixes_applied: { type: "boolean" },
+    summary: { type: "string" },
+    handoff: { type: "string" },
+    notes: { type: "string" },
+    reason: { type: "string" },
+    remaining_work: { type: "array", items: { type: "string" } },
+    continue_role: { type: "string" },
+    continue_step: { type: "string" },
+    ...HANDOFF_PROPERTIES,
+  },
+};
+
 const GATE_SCHEMA = {
   type: "object", additionalProperties: false,
   required: ["status", "project", "repo", "gate", "step", "attempt", "setup_rc", "build_rc", "test_rc", "result_rc", "check_results", "gate_clean", "evidence_path", "log_path", "raw_tail", "integrity"],
@@ -523,8 +601,8 @@ function contextEconomyPolicy(role) {
   rc=$?
   echo "rc=$rc"
   tail -80 /tmp/${STATIC_CONTEXT.project}_${role}.log
-- If you approach about ${CONTEXT_ECONOMY.max_tool_calls_before_checkpoint} tool calls${CONTEXT_ECONOMY.checkpoint_after_major_test_milestone ? " or complete a major compile/test milestone" : ""}, write the durable handoff and return status:\"checkpoint\" with remaining_work, continue_role, and continue_step instead of growing one huge transcript.
-- ${CONTEXT_ECONOMY.require_handoff_before_checkpoint ? "A checkpoint is invalid without a written handoff_path." : "Prefer a written handoff_path before checkpointing."}`;
+- Continue within the same agent when useful. Do not checkpoint or exit merely because the transcript or tool-call count is growing.
+- If you genuinely cannot continue safely because of an external blocker, write the durable handoff and return blocked/needs_decision with concrete remaining work.`;
 }
 
 function testSummaryLines(testsRun) {
@@ -989,6 +1067,130 @@ function formatRedFindings(red) {
   return (red?.failures_found || []).map((finding) => `[FAIL] ${finding.test_name}: ${finding.detail}`).join("\n") || red?.notes || "Red Team reported failures.";
 }
 
+function formatCodeReviewFindings(cr) {
+  return (cr?.findings || [])
+    .map((f) => `[${(f.severity || "").toUpperCase()}] ${f.file ? f.file + ": " : ""}${f.detail}`)
+    .join("\n") || cr?.summary || "Code review reported findings.";
+}
+
+// Blocking = a blocker/major finding that should short-circuit back to dev/fix
+// BEFORE a red-team cycle is spent (the cheap-filter rationale). Minor findings
+// are advisory and do not gate.
+function codeReviewBlocking(cr) {
+  if (!cr) return false;
+  if (cr.clean === true) return false;
+  return (cr.findings || []).some((f) => f.severity === "blocker" || f.severity === "major");
+}
+
+// Emit the /code-review filter agent. Reads the diff (or the step's touched
+// files) and reports diff-readable logic bugs -- the cheap complement to the
+// expensive red-team harness. Runs the /code-review skill via the Skill tool the
+// agents already have; applies fixes with --fix only when configured.
+async function runCodeReview(step, placement, state, runtime, stage, results) {
+  const cr = step.codeReview;
+  const scopeArg = cr.scope === "step" ? "the files this step touched" : "the current working-tree diff";
+  const fixArg = cr.applyFixes ? " --fix" : "";
+  const agentId = `code_review_${placement}`;
+  const outcome = await invokeSubstantiveRoleWithContinuations({
+    step, role: "code_review", cycle: 0, attempt: 0, agentId,
+    state, runtime, stage, results,
+    label: `${step.id} code-review ${placement}`, model: step.model, effort: cr.effort, schema: CODE_REVIEW_SCHEMA,
+    promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
+=== CODE-REVIEW FILTER: ${step.id} — ${step.title} (${placement}) ===
+You are a cheap, narrow code-review FILTER, distinct from the holistic Code Reviewer.
+Invoke the /code-review skill at effort ${cr.effort} over ${scopeArg}${fixArg}.
+Purpose: catch diff-readable logic bugs (e.g. a fix that edits one branch and forgets another) for the cost of one pass, so the expensive red-team harness work is reserved for behavioral/protocol/security defects that need runtime proof. Do NOT attempt runtime adversarial testing here.
+Report findings as machine-readable CODE_REVIEW_SCHEMA. Set placement:"${placement}". Set clean:true only if no blocker/major finding remains. If you ran with --fix, set fixes_applied accordingly.
+${contextEconomyPolicy("code_review")}
+${priorContextBlock(state)}
+${handoffInstructions(step, "CODE_REVIEW", 0, 0, continuation, `${agentId}_k${continuation}`)}`,
+  });
+  return outcome;
+}
+
+// Emit the fanned red-team round: one blindered lens agent per configured lens
+// (run as a pipeline so each lens's findings verify as soon as that lens
+// finishes -- fast lenses are not blocked by the slow one), each finding
+// adversarially verified by `verifyVotes` refuters, aggregated into ONE
+// RED_SCHEMA report so downstream cycle/convergence routing is unchanged.
+async function runFannedRedTeam(step, cycle, state, runtime, stage, results) {
+  const fan = step.redteamFan;
+  const attackPhase = `${step.id} red team ${cycle} attack`;
+  const verifyPhase = `${step.id} red team ${cycle} verify`;
+  const majority = Math.floor(fan.verifyVotes / 2) + 1;
+
+  const perLens = await pipeline(
+    fan.lenses,
+    (lens) => agent(
+      `=== FANNED RED TEAM LENS [${lens.key}]: ${step.id} — ${step.title} (cycle ${cycle}) ===
+You are ONE red-team lens. You are BLIND to the other lenses on purpose.
+Attack ONLY your assigned surface; do not broaden. Write adversarial WHITE BOX tests/spec checks and run deterministic repros. Do not silently patch the implementation.
+Report failures in structured form (RED_SCHEMA).
+${externalMemoryRoleGuidance("redteam")}
+Your lens mandate:
+${lens.prompt}
+
+${step.prompt.redteam}`,
+      agentOptions({ label: `attack:${lens.key}`, phase: attackPhase, model: fan.model, effort: fan.effort, schema: RED_SCHEMA })
+    ),
+    (red, lens) => {
+      const findings = (red && red.failures_found) || [];
+      if (!fan.verify || findings.length === 0) {
+        return { lens, red, confirmed: findings };
+      }
+      return parallel(findings.map((finding) => () =>
+        parallel(Array.from({ length: fan.verifyVotes }, (_unused, voteIndex) => () =>
+          agent(
+            `=== FANNED RED-TEAM VERIFIER (lens ${lens.key}, vote ${voteIndex + 1}): ${step.id} ===
+Adversarially verify one red-team finding. TRY TO REFUTE it. Default to real:false when uncertain.
+Finding: ${finding.test_name}
+Detail: ${finding.detail}`,
+            agentOptions({ label: `verify:${lens.key}`, phase: verifyPhase, model: fan.model, effort: fan.effort, schema: FAN_VERDICT_SCHEMA })
+          )
+        )).then((votes) => {
+          const refuted = (votes || []).filter(Boolean).filter((v) => v.real === false).length;
+          return refuted >= majority ? null : finding;
+        })
+      )).then((verified) => ({ lens, red, confirmed: verified.filter(Boolean) }));
+    }
+  );
+
+  const lensResults = (perLens || []).filter(Boolean);
+  const confirmed = lensResults.flatMap((entry) => entry.confirmed || []);
+  const attackTests = lensResults.flatMap((entry) => (entry.red && entry.red.adversarial_tests_written) || []);
+  const anyBlocked = lensResults.some((entry) => entry.red && (entry.red.status === "blocked" || entry.red.status === "needs_decision"));
+
+  let critic = null;
+  if (fan.completenessCritic) {
+    critic = await agent(
+      `=== FANNED RED-TEAM COMPLETENESS CRITIC: ${step.id} — ${step.title} (cycle ${cycle}) ===
+The following attack lenses ran: ${fan.lenses.map((l) => l.key).join(", ")}.
+Confirmed findings so far:
+${confirmed.map((f) => `- ${f.test_name}: ${f.detail}`).join("\n") || "(none)"}
+Name attack surfaces NO lens covered. Suggest new lens keys + rationale. You are advisory only; do not run attacks.`,
+      agentOptions({ label: `${step.id} fan critic ${cycle}`, phase: attackPhase, model: fan.model, effort: fan.effort, schema: FAN_CRITIC_SCHEMA })
+    );
+  }
+
+  // Aggregate into the SAME RED_SCHEMA the single-agent path produces so the
+  // caller's cycle/convergence logic is untouched.
+  const status = anyBlocked ? "blocked" : (confirmed.length === 0 ? "all_passed" : "failures_found");
+  const criticNote = critic
+    ? `\nCompleteness critic — uncovered: ${(critic.uncovered_surfaces || []).join("; ") || "(none)"}; suggested lenses: ${(critic.suggested_lenses || []).map((s) => s.key).join(", ") || "(none)"}`
+    : "";
+  return {
+    status,
+    summary: `Fanned red team: ${fan.lenses.length} lenses, ${confirmed.length} confirmed finding(s) after verify (votes=${fan.verifyVotes}).${criticNote}`,
+    adversarial_tests_written: attackTests,
+    tests_passed: confirmed.length === 0,
+    failures_found: confirmed,
+    external_memory_notes: "",
+    handoff: "",
+    notes: criticNote.trim(),
+    lens_results: lensResults.map((entry) => ({ key: entry.lens.key, confirmed: (entry.confirmed || []).length })),
+  };
+}
+
 function formatReviewFindings(review) {
   return (review?.findings || []).map((finding) => `[${finding.severity}] ${finding.detail}`).join("\n") || review?.verdict_reason || "Code Reviewer rejected the change.";
 }
@@ -1139,12 +1341,37 @@ ${step.prompt.dev}${redFindings ? `\n\nThe Red Team found these failures:\n${red
         }
       }
 
+      // Optional cheap /code-review filter placed BEFORE the red-team round
+      // (post_dev / pre_redteam). A blocking finding short-circuits back to
+      // dev/fix without spending a red-team cycle.
+      if (runDevThisCycle && step.codeReview && step.codeReview.enabled &&
+          (step.codeReview.placement === "post_dev" || step.codeReview.placement === "pre_redteam")) {
+        const crOutcome = await runCodeReview(step, step.codeReview.placement, handoffState, runtime, STAGE, results);
+        if (crOutcome.halt) return crOutcome.halt;
+        const cr = crOutcome.output;
+        stepResult.code_review = stepResult.code_review || [];
+        stepResult.code_review.push({ cycle, placement: step.codeReview.placement, cr });
+        if (codeReviewBlocking(cr)) {
+          // Feed findings into the next dev cycle's redFindings channel and skip
+          // the red team this cycle (the expensive oracle runs only on clean diffs).
+          redFindings = formatCodeReviewFindings(cr);
+          redPassed = false;
+          continue;
+        }
+      }
+
       if (runRedThisCycle) {
-        const redTeamed = await invokeSubstantiveRoleWithContinuations({
-          step, role: "redteam", cycle, attempt: 0, agentId: `redteam_${cycle}`,
-          state: handoffState, runtime, stage: STAGE, results,
-          label: `${step.id} red team ${cycle}`, model: step.model, effort: "high", schema: RED_SCHEMA,
-          promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
+        let red;
+        if (step.redteamFan && step.redteamFan.enabled) {
+          // Fanned red team: parallel blindered lenses + adversarial verify,
+          // aggregated into one RED_SCHEMA report (see runFannedRedTeam).
+          red = await runFannedRedTeam(step, cycle, handoffState, runtime, STAGE, results);
+        } else {
+          const redTeamed = await invokeSubstantiveRoleWithContinuations({
+            step, role: "redteam", cycle, attempt: 0, agentId: `redteam_${cycle}`,
+            state: handoffState, runtime, stage: STAGE, results,
+            label: `${step.id} red team ${cycle}`, model: step.model, effort: "high", schema: RED_SCHEMA,
+            promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
 === ADVERSARIAL RED TEAM: ${step.id} — ${step.title} (cycle ${cycle}) ===
 You are the Red Team. Read the Developer implementation.
 Write adversarial WHITE BOX tests/spec checks designed to break it.
@@ -1157,9 +1384,10 @@ Start from the current diff, Developer handoff, and targeted verification. Do no
 ${handoffInstructions(step, "REDTEAM", cycle, 0, continuation, `redteam_${cycle}_k${continuation}`)}
 
 ${step.prompt.redteam}`,
-        });
-        if (redTeamed.halt) return redTeamed.halt;
-        const red = redTeamed.output;
+          });
+          if (redTeamed.halt) return redTeamed.halt;
+          red = redTeamed.output;
+        }
         stepResult.dev_cycles.push({ cycle, impl: lastImpl, red });
         redTestFiles.push(...(red?.adversarial_tests_written || []));
         if (!red || red.status === "blocked" || red.status === "needs_decision") {
@@ -1250,6 +1478,22 @@ ${step.prompt.dev}`,
     if (!accepted) {
       const reason = !lastGateClean ? "objective_gate_failed_after_retries" : "review_rejected_after_retries";
       return { halted_at: `${step.id}:review`, reason, stage: STAGE, results };
+    }
+
+    // Optional final comprehensive /code-review pass: one audit of the whole
+    // accepted step diff before commit. Unlike the pre-redteam filter this does
+    // not loop back to dev/fix (review already accepted); a blocking finding
+    // halts the step so a human decides.
+    if (step.codeReview && step.codeReview.enabled && step.codeReview.placement === "final" &&
+        roleIsAtOrAfter(START_AT_ROLE, "review")) {
+      const crOutcome = await runCodeReview(step, "final", handoffState, runtime, STAGE, results);
+      if (crOutcome.halt) return crOutcome.halt;
+      const cr = crOutcome.output;
+      stepResult.code_review = stepResult.code_review || [];
+      stepResult.code_review.push({ cycle: 0, placement: "final", cr });
+      if (codeReviewBlocking(cr)) {
+        return { halted_at: `${step.id}:code_review_final`, reason: "code_review_blocking_finding", stage: STAGE, results };
+      }
     }
 
     if (step.phases.includes("commit") && roleIsAtOrAfter(START_AT_ROLE, "commit")) {

@@ -5,6 +5,8 @@ import sys
 import os
 import shutil
 import subprocess
+import re
+import json
 
 from aiwk.cli import initialize
 from aiwk.render import render
@@ -155,8 +157,6 @@ context_economy:
         """The runtime rejects a JSON Schema whose ``required`` array has
         duplicate items. Every rendered schema (after resolving the shared
         ``...HANDOFF_REQUIRED`` spread) must list each field at most once."""
-        import re
-
         text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
 
         handoff_block = re.search(
@@ -350,10 +350,13 @@ context_economy:
             "MAX_CHECKPOINT_CONTINUATIONS",
             "Context economy rule:",
             "Broad grep/find/read sweeps are allowed only if the handoff is missing",
+            "Do not checkpoint or exit merely because the transcript or tool-call count is growing",
             "tail -80",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
+        self.assertNotIn("If you approach about", text)
+        self.assertNotIn("max_tool_calls_before_checkpoint} tool calls", text)
 
     def test_unique_handoff_paths_include_role_cycle_attempt_and_continuation(self):
         text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
@@ -429,8 +432,7 @@ context_economy:
             "Discovery did the broad map for this step",
             "Target the files/symbols named in the Discovery handoff",
             "Tell Developer what NOT to rediscover",
-            "max_tool_calls_before_checkpoint",
-            "about ${CONTEXT_ECONOMY.max_tool_calls_before_checkpoint} tool calls",
+            "Do not checkpoint or exit merely because the transcript or tool-call count is growing",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
@@ -518,3 +520,93 @@ context_economy:
         self.assertEqual(Path(result["workflow_spec"]), custom_spec.resolve())
         self.assertEqual(Path(result["output_path"]), output.resolve())
         self.assertIn("CUSTOM_SS1", output.read_text(encoding="utf-8"))
+
+    # ------------------------------------------------------------------
+    # Optional modules: code-review filter and fanned red team.
+    # ------------------------------------------------------------------
+
+    def enable_code_review(self, placement="pre_redteam"):
+        workflow_path = self.project_root / "workflow.yaml"
+        block = (
+            "        code_review:\n"
+            "          enabled: true\n"
+            f"          placement: {placement}\n"
+            "          effort: high\n"
+            "          apply_fixes: true\n"
+        )
+        text = workflow_path.read_text(encoding="utf-8").replace("        phases:\n", block + "        phases:\n", 1)
+        workflow_path.write_text(text, encoding="utf-8")
+
+    def enable_redteam_fan(self):
+        workflow_path = self.project_root / "workflow.yaml"
+        block = (
+            "        redteam_fan:\n"
+            "          enabled: true\n"
+            "          verify_votes: 3\n"
+            "          completeness_critic: true\n"
+            "          lenses:\n"
+            "            - key: payload-bound\n"
+            "              prompt: attack the receive-boundary payload limit\n"
+            "            - key: fault-drop\n"
+            "              prompt: attack connection disposition after a fault\n"
+        )
+        text = workflow_path.read_text(encoding="utf-8").replace("        phases:\n", block + "        phases:\n", 1)
+        workflow_path.write_text(text, encoding="utf-8")
+
+    def test_modules_disabled_are_inert_and_config_defaults_false(self):
+        """When neither optional module is configured, the generated workflow's
+        ALL_STEPS carries both config blobs with enabled:false, so the always-
+        present helper functions never fire. The module code is dormant
+        infrastructure (like formatRedFindings), gated entirely by the runtime
+        enabled checks -- a plain spec runs the exact single-agent route."""
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        steps_match = re.search(r"const ALL_STEPS = (\{.*?\});\nconst MAX_DEV_RED_CYCLES", text, re.DOTALL)
+        self.assertIsNotNone(steps_match)
+        steps = json.loads(steps_match.group(1))
+        step = steps["build"]["steps"][0]
+        self.assertFalse(step["codeReview"]["enabled"])
+        self.assertFalse(step["redteamFan"]["enabled"])
+        self.assertEqual(step["redteamFan"]["lenses"], [])
+        # The runtime gates guarantee inertness: the single-agent red team is only
+        # skipped when the fan flag is true, and the /code-review filter only runs
+        # when its flag is true.
+        self.assertIn("if (step.redteamFan && step.redteamFan.enabled)", text)
+        self.assertIn("step.codeReview && step.codeReview.enabled", text)
+
+    def test_code_review_module_renders_when_enabled(self):
+        self.enable_code_review("pre_redteam")
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        for marker in (
+            "CODE_REVIEW_SCHEMA", "runCodeReview", "codeReviewBlocking",
+            "formatCodeReviewFindings", "CODE-REVIEW FILTER", "/code-review skill",
+            "code_review_blocking_finding",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_redteam_fan_module_renders_when_enabled(self):
+        self.enable_redteam_fan()
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        for marker in (
+            "runFannedRedTeam", "FAN_VERDICT_SCHEMA", "FAN_CRITIC_SCHEMA",
+            "FANNED RED TEAM LENS", "attack:", "verify:", "payload-bound",
+            "step.redteamFan && step.redteamFan.enabled",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
+    def test_modules_render_passes_javascript_syntax_check(self):
+        self.enable_code_review("pre_redteam")
+        self.enable_redteam_fan()
+        output = Path(render(self.config_path)["output_path"])
+        node = shutil.which("node")
+        code = Path("/usr/share/code/code")
+        if node:
+            command = [node, "--check", str(output)]
+            env = None
+        elif code.exists():
+            command = [str(code), "--check", str(output)]
+            env = {**os.environ, "ELECTRON_RUN_AS_NODE": "1"}
+        else:
+            self.skipTest("No node-compatible syntax checker available")
+        subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)

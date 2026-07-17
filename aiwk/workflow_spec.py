@@ -50,6 +50,66 @@ class DiscoveryConfig:
     effort: str = "high"
 
 
+# Placement of the optional /code-review filter relative to the red-team round.
+# post_dev / pre_redteam run it on the dev/fix diff BEFORE a red-team cycle is
+# spent (the cheap-filter position); final runs one comprehensive pass at the end
+# of the step. See CodeReviewConfig.
+CODE_REVIEW_PLACEMENTS = {"post_dev", "pre_redteam", "final"}
+CODE_REVIEW_EFFORTS = {"low", "medium", "high", "max"}
+CODE_REVIEW_SCOPES = {"diff", "step"}
+
+
+@dataclass(frozen=True)
+class CodeReviewConfig:
+    """Optional /code-review agent module (mirrors DiscoveryConfig).
+
+    Distinct from the holistic reviewer emitted by the ``review`` phase: this is
+    a cheap, narrow filter that invokes the ``/code-review`` skill on the diff to
+    catch diff-readable logic bugs (e.g. a fix that edits one branch and forgets
+    another) for the cost of one pass, so the expensive red-team harness work is
+    reserved for behavioral/protocol/security defects that need runtime proof.
+    Default OFF; opting in never changes the existing review/redteam phases.
+    """
+
+    enabled: bool = False
+    placement: str = "post_dev"
+    effort: str = "medium"
+    apply_fixes: bool = False
+    scope: str = "diff"
+
+
+@dataclass(frozen=True)
+class RedTeamLens:
+    """One blindered attack-lens mandate in a fanned red-team round.
+
+    ``prompt`` should cite the spec scenario / surface it attacks; lenses are
+    blind to each other on purpose so diversity of mandate collapses many serial
+    red-team cycles into one round.
+    """
+
+    key: str
+    prompt: str
+
+
+@dataclass(frozen=True)
+class RedTeamFanConfig:
+    """Optional fanned red-team module (mirrors DiscoveryConfig).
+
+    When disabled (default) the single-agent red-team behavior is unchanged.
+    When enabled, N lens agents run in parallel and each finding is adversarially
+    verified before it is reported through the SAME red-team findings schema, so
+    downstream cycle/convergence routing is untouched.
+    """
+
+    enabled: bool = False
+    lenses: tuple[RedTeamLens, ...] = ()
+    verify: bool = True
+    verify_votes: int = 1
+    model: str = "opus"
+    effort: str = "high"
+    completeness_critic: bool = False
+
+
 @dataclass(frozen=True)
 class ContextEconomyConfig:
     max_tool_calls_before_checkpoint: int = 30
@@ -94,6 +154,8 @@ class WorkflowStep:
     objective_gate: str | None = None
     commit: CommitPolicy | None = None
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+    code_review: CodeReviewConfig = field(default_factory=CodeReviewConfig)
+    redteam_fan: RedTeamFanConfig = field(default_factory=RedTeamFanConfig)
 
 
 @dataclass(frozen=True)
@@ -113,6 +175,8 @@ class WorkflowSpec:
     beads: BeadsConfig = field(default_factory=BeadsConfig)
     external_memory: ExternalMemoryConfig = field(default_factory=ExternalMemoryConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+    code_review: CodeReviewConfig = field(default_factory=CodeReviewConfig)
+    redteam_fan: RedTeamFanConfig = field(default_factory=RedTeamFanConfig)
     context_economy: ContextEconomyConfig = field(default_factory=ContextEconomyConfig)
 
 
@@ -211,6 +275,8 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
     beads = _load_beads(raw.get("beads"))
     external_memory = _load_external_memory(raw.get("external_memory"), beads)
     discovery = _load_discovery(raw.get("discovery"), DiscoveryConfig(), "top-level discovery")
+    code_review = _load_code_review(raw.get("code_review"), CodeReviewConfig(), "top-level code_review")
+    redteam_fan = _load_redteam_fan(raw.get("redteam_fan"), RedTeamFanConfig(), "top-level redteam_fan")
     context_economy = _load_context_economy(raw.get("context_economy"))
     stages: dict[str, WorkflowStage] = {}
     for stage_name, stage_raw in raw["stages"].items():
@@ -240,6 +306,12 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
             step_discovery = _load_discovery(
                 step_raw.get("discovery"), discovery, f"Step '{step_id}' discovery"
             ) if "discovery" in step_raw else discovery
+            step_code_review = _load_code_review(
+                step_raw.get("code_review"), code_review, f"Step '{step_id}' code_review"
+            ) if "code_review" in step_raw else code_review
+            step_redteam_fan = _load_redteam_fan(
+                step_raw.get("redteam_fan"), redteam_fan, f"Step '{step_id}' redteam_fan"
+            ) if "redteam_fan" in step_raw else redteam_fan
             if not isinstance(phases, list) or not phases:
                 raise ValueError(f"Step '{step_id}' must define phases")
             if not isinstance(prompts, dict):
@@ -255,6 +327,14 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
                 prompt_value = prompts.get("discovery")
                 if prompt_value is not None and (not isinstance(prompt_value, str) or not prompt_value.strip()):
                     raise ValueError(f"Missing prompt for phase 'discovery' in step '{step_id}'")
+            if step_code_review.enabled and "dev" not in phases:
+                raise ValueError(
+                    f"Step '{step_id}' code_review.enabled requires a 'dev' phase (nothing to review otherwise)"
+                )
+            if step_redteam_fan.enabled and "redteam" not in phases:
+                raise ValueError(
+                    f"Step '{step_id}' redteam_fan.enabled requires a 'redteam' phase"
+                )
             steps.append(WorkflowStep(
                 id=step_id,
                 title=str(step_raw.get("title", "")),
@@ -265,6 +345,8 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
                 objective_gate=objective_gate,
                 commit=step_commit,
                 discovery=step_discovery,
+                code_review=step_code_review,
+                redteam_fan=step_redteam_fan,
             ))
         stages[str(stage_name)] = WorkflowStage(str(stage_raw.get("description", "")), steps)
     return WorkflowSpec(
@@ -272,7 +354,8 @@ def load_workflow_spec(path: str | Path) -> WorkflowSpec:
         default_stage=default_stage, stages=stages,
         objective_gates=objective_gates, commit=commit_policy, beads=beads,
         external_memory=external_memory,
-        discovery=discovery, context_economy=context_economy,
+        discovery=discovery, code_review=code_review, redteam_fan=redteam_fan,
+        context_economy=context_economy,
     )
 
 
@@ -319,6 +402,80 @@ def _load_discovery(raw: Any, base: DiscoveryConfig, label: str) -> DiscoveryCon
     if not isinstance(effort, str) or not effort:
         raise ValueError(f"{label}.effort must be a string")
     return DiscoveryConfig(enabled, model, effort)
+
+
+def _load_code_review(raw: Any, base: CodeReviewConfig, label: str) -> CodeReviewConfig:
+    if raw is None:
+        return base
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be a mapping")
+    enabled = raw.get("enabled", base.enabled)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{label}.enabled must be a boolean")
+    placement = raw.get("placement", base.placement)
+    if not isinstance(placement, str) or placement not in CODE_REVIEW_PLACEMENTS:
+        raise ValueError(f"{label}.placement must be one of: {', '.join(sorted(CODE_REVIEW_PLACEMENTS))}")
+    effort = raw.get("effort", base.effort)
+    if not isinstance(effort, str) or effort not in CODE_REVIEW_EFFORTS:
+        raise ValueError(f"{label}.effort must be one of: {', '.join(sorted(CODE_REVIEW_EFFORTS))}")
+    apply_fixes = raw.get("apply_fixes", base.apply_fixes)
+    if not isinstance(apply_fixes, bool):
+        raise ValueError(f"{label}.apply_fixes must be a boolean")
+    scope = raw.get("scope", base.scope)
+    if not isinstance(scope, str) or scope not in CODE_REVIEW_SCOPES:
+        raise ValueError(f"{label}.scope must be one of: {', '.join(sorted(CODE_REVIEW_SCOPES))}")
+    return CodeReviewConfig(enabled, placement, effort, apply_fixes, scope)
+
+
+def _load_redteam_fan(raw: Any, base: RedTeamFanConfig, label: str) -> RedTeamFanConfig:
+    if raw is None:
+        return base
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be a mapping")
+    enabled = raw.get("enabled", base.enabled)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{label}.enabled must be a boolean")
+    verify = raw.get("verify", base.verify)
+    if not isinstance(verify, bool):
+        raise ValueError(f"{label}.verify must be a boolean")
+    verify_votes = raw.get("verify_votes", base.verify_votes)
+    if isinstance(verify_votes, bool) or not isinstance(verify_votes, int) or verify_votes < 1:
+        raise ValueError(f"{label}.verify_votes must be a positive integer")
+    model = raw.get("model", base.model)
+    if not isinstance(model, str) or not model:
+        raise ValueError(f"{label}.model must be a string")
+    effort = raw.get("effort", base.effort)
+    if not isinstance(effort, str) or not effort:
+        raise ValueError(f"{label}.effort must be a string")
+    completeness_critic = raw.get("completeness_critic", base.completeness_critic)
+    if not isinstance(completeness_critic, bool):
+        raise ValueError(f"{label}.completeness_critic must be a boolean")
+    if "lenses" in raw:
+        lenses_raw = raw.get("lenses")
+        if not isinstance(lenses_raw, list):
+            raise ValueError(f"{label}.lenses must be a list")
+        lenses: list[RedTeamLens] = []
+        seen_keys: set[str] = set()
+        for lens_raw in lenses_raw:
+            if not isinstance(lens_raw, dict):
+                raise ValueError(f"{label}.lenses entries must be mappings")
+            key = lens_raw.get("key")
+            prompt = lens_raw.get("prompt")
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError(f"{label}.lenses entry requires a non-empty string key")
+            if key in seen_keys:
+                raise ValueError(f"{label}.lenses has duplicate key '{key}'")
+            seen_keys.add(key)
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError(f"{label}.lenses entry '{key}' requires a non-empty string prompt")
+            lenses.append(RedTeamLens(key, prompt))
+        lens_tuple = tuple(lenses)
+    else:
+        lens_tuple = base.lenses
+    # A fan of one is just the single agent; require at least two distinct lenses.
+    if enabled and len(lens_tuple) < 2:
+        raise ValueError(f"{label}.enabled requires at least 2 lenses (a fan of one is the single agent)")
+    return RedTeamFanConfig(enabled, lens_tuple, verify, verify_votes, model, effort, completeness_critic)
 
 
 def _load_context_economy(raw: Any) -> ContextEconomyConfig:

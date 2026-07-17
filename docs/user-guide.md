@@ -325,18 +325,16 @@ steps:
 
 Discovery runs after Scope and before Developer. It should read supplied handoffs first, perform bounded repo discovery, write a compact repo-map handoff, and tell Developer what not to rediscover.
 
-### Context economy and checkpoints
+### Context economy
 
-Configure soft checkpoint guidance:
+Configure continuation limits for explicit checkpoint outputs:
 
 ```yaml
 context_economy:
-  max_tool_calls_before_checkpoint: 30
-  checkpoint_after_major_test_milestone: true
-  require_handoff_before_checkpoint: true
+  max_checkpoint_continuations: 1
 ```
 
-Generated prompts tell long agents to redirect long command output to logs, return summaries/tails, and stop with `status:"checkpoint"` after a large discovery/debug/test milestone. The workflow surfaces that as `checkpoint_requested` with the handoff path and remaining work. Start a fresh continuation with `handoffPath` set to the checkpoint handoff.
+Generated prompts tell agents to read supplied handoffs first, avoid repeated broad discovery, redirect long command output to logs, and return summaries/tails. They no longer tell agents to stop after a fixed tool-call count or major test milestone. If a role explicitly returns `status:"checkpoint"` anyway, the workflow reinvokes the same logical role/step with the checkpoint handoff and remaining work until completion or `max_checkpoint_continuations`.
 
 ## 11. Inspect objective evidence
 

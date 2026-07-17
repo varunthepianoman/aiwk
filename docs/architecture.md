@@ -191,7 +191,7 @@ Context packs intentionally prefer summaries and pointers over full data:
 
 Discovery agents are optional. They centralize broad repository mapping before Developer so later agents can use targeted verification instead of repeated global sweeps.
 
-Checkpoint/continuation support is prompt-level. Since generated JS cannot reliably observe provider-internal tool-call counts, long agents are instructed to write a handoff and return `status:"checkpoint"`; generated routing surfaces a structured `checkpoint_requested` halt for an operator to continue with fresh context.
+Checkpoint/continuation support is explicit, not tool-count driven. Generated JS cannot reliably observe provider-internal tool-call counts, and generated prompts no longer tell agents to stop after a fixed number of tool calls. If an agent explicitly returns `status:"checkpoint"`, generated routing continues the same logical role/step with the checkpoint handoff and remaining work until completion or the configured continuation limit.
 
 ## Safety model
 
