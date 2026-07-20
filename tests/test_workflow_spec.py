@@ -336,6 +336,46 @@ context_economy:
         self.assertTrue(step.redteam_fan.completeness_critic)
         self.assertEqual([lens.key for lens in step.redteam_fan.lenses], ["lens-a", "lens-b"])
 
+    def test_redteam_fan_verify_tier_defaults_to_inherit(self):
+        # With no verify_model/verify_effort the attack tier is inherited (empty).
+        spec = load_workflow_spec(self.write(starter_workflow("demo")))
+        step = spec.stages["build"].steps[0]
+        self.assertEqual(step.redteam_fan.verify_model, "")
+        self.assertEqual(step.redteam_fan.verify_effort, "")
+
+    def test_redteam_fan_separate_verify_tier_parses(self):
+        fan = ("        redteam_fan:\n          enabled: true\n          model: opus\n"
+               "          effort: high\n          verify_model: sonnet\n"
+               "          verify_effort: medium\n          lenses:\n"
+               "            - key: a\n              prompt: attack a\n"
+               "            - key: b\n              prompt: attack b\n")
+        text = starter_workflow("demo").replace("        phases:\n", fan + "        phases:\n", 1)
+        spec = load_workflow_spec(self.write(text))
+        step = spec.stages["build"].steps[0]
+        self.assertEqual(step.redteam_fan.model, "opus")
+        self.assertEqual(step.redteam_fan.effort, "high")
+        self.assertEqual(step.redteam_fan.verify_model, "sonnet")
+        self.assertEqual(step.redteam_fan.verify_effort, "medium")
+
+    def test_redteam_fan_critic_tier_defaults_to_inherit(self):
+        spec = load_workflow_spec(self.write(starter_workflow("demo")))
+        step = spec.stages["build"].steps[0]
+        self.assertEqual(step.redteam_fan.critic_model, "")
+        self.assertEqual(step.redteam_fan.critic_effort, "")
+
+    def test_redteam_fan_separate_critic_tier_parses(self):
+        fan = ("        redteam_fan:\n          enabled: true\n          model: opus\n"
+               "          effort: high\n          critic_model: sonnet\n"
+               "          critic_effort: medium\n          completeness_critic: true\n"
+               "          lenses:\n"
+               "            - key: a\n              prompt: attack a\n"
+               "            - key: b\n              prompt: attack b\n")
+        text = starter_workflow("demo").replace("        phases:\n", fan + "        phases:\n", 1)
+        spec = load_workflow_spec(self.write(text))
+        step = spec.stages["build"].steps[0]
+        self.assertEqual(step.redteam_fan.critic_model, "sonnet")
+        self.assertEqual(step.redteam_fan.critic_effort, "medium")
+
     def test_redteam_fan_requires_two_lenses_when_enabled(self):
         fan = ("        redteam_fan:\n          enabled: true\n          lenses:\n"
                "            - key: only-one\n              prompt: attack\n")

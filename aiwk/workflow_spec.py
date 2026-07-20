@@ -108,6 +108,14 @@ class RedTeamFanConfig:
     model: str = "opus"
     effort: str = "high"
     completeness_critic: bool = False
+    # Attack lenses run on model/effort above. The adversarial verify stage only
+    # refutes an already-stated finding, and the completeness critic only writes
+    # advisory coverage suggestions -- both are lighter than discovery, so they
+    # can run cheaper. Empty means "inherit the attack model/effort".
+    verify_model: str = ""
+    verify_effort: str = ""
+    critic_model: str = ""
+    critic_effort: str = ""
 
 
 @dataclass(frozen=True)
@@ -447,6 +455,19 @@ def _load_redteam_fan(raw: Any, base: RedTeamFanConfig, label: str) -> RedTeamFa
     effort = raw.get("effort", base.effort)
     if not isinstance(effort, str) or not effort:
         raise ValueError(f"{label}.effort must be a string")
+    # Optional separate tier for the verify stage; empty string inherits attack.
+    verify_model = raw.get("verify_model", base.verify_model)
+    if not isinstance(verify_model, str):
+        raise ValueError(f"{label}.verify_model must be a string")
+    verify_effort = raw.get("verify_effort", base.verify_effort)
+    if not isinstance(verify_effort, str):
+        raise ValueError(f"{label}.verify_effort must be a string")
+    critic_model = raw.get("critic_model", base.critic_model)
+    if not isinstance(critic_model, str):
+        raise ValueError(f"{label}.critic_model must be a string")
+    critic_effort = raw.get("critic_effort", base.critic_effort)
+    if not isinstance(critic_effort, str):
+        raise ValueError(f"{label}.critic_effort must be a string")
     completeness_critic = raw.get("completeness_critic", base.completeness_critic)
     if not isinstance(completeness_critic, bool):
         raise ValueError(f"{label}.completeness_critic must be a boolean")
@@ -475,7 +496,10 @@ def _load_redteam_fan(raw: Any, base: RedTeamFanConfig, label: str) -> RedTeamFa
     # A fan of one is just the single agent; require at least two distinct lenses.
     if enabled and len(lens_tuple) < 2:
         raise ValueError(f"{label}.enabled requires at least 2 lenses (a fan of one is the single agent)")
-    return RedTeamFanConfig(enabled, lens_tuple, verify, verify_votes, model, effort, completeness_critic)
+    return RedTeamFanConfig(
+        enabled, lens_tuple, verify, verify_votes, model, effort, completeness_critic,
+        verify_model, verify_effort, critic_model, critic_effort,
+    )
 
 
 def _load_context_economy(raw: Any) -> ContextEconomyConfig:

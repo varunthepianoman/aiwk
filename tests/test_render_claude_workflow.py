@@ -32,6 +32,7 @@ class ClaudeWorkflowRenderTests(unittest.TestCase):
   default:
     enabled: true
     description: Run deterministic project checks.
+    timeout_seconds: 1200
     setup:
       commands:
         - python --version
@@ -152,6 +153,51 @@ context_economy:
             with self.subTest(marker=expected):
                 self.assertIn(expected, text)
         self.assertNotIn("await agent({", text)
+
+    def test_fanned_redteam_verify_uses_separate_tier(self):
+        # The attack lens runs on fan.model/fan.effort; the verify refuters run
+        # on the (cheaper) fan.verifyModel/fan.verifyEffort tier.
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        self.assertIn(
+            "label: `attack:${lens.key}`, phase: attackPhase, model: fan.model, effort: fan.effort",
+            text,
+        )
+        self.assertIn(
+            "label: `verify:${lens.key}`, phase: verifyPhase, model: fan.verifyModel, effort: fan.verifyEffort",
+            text,
+        )
+        # The resolved verify and critic tiers are emitted into each fan block.
+        self.assertIn("verifyModel", text)
+        self.assertIn("verifyEffort", text)
+        self.assertIn(
+            "label: `${step.id} fan critic ${cycle}`, phase: attackPhase, model: fan.criticModel, effort: fan.criticEffort",
+            text,
+        )
+
+    def test_completeness_critic_is_piped_back_to_dev(self):
+        # The critic's coverage gaps are exposed on the red-team result and folded
+        # into the dev-facing findings channel (formatRedFindings), not dead-ended.
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        self.assertIn("critic_suggestions:", text)          # exposed on the result
+        self.assertIn("red?.critic_suggestions", text)      # consumed by formatRedFindings
+        self.assertIn("Completeness critic (advisory)", text)
+
+    def test_nonblocking_code_review_gets_dev_fix_before_redteam(self):
+        # Minor/non-blocking CR findings trigger a bounded dev fix pass placed
+        # BEFORE the red team, non-gating, without re-running code review.
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        self.assertIn("codeReviewHasFindings", text)
+        self.assertIn("DEVELOPER (CODE-REVIEW FIX)", text)
+        self.assertIn("if (runRedThisCycle && codeReviewHasFindings(cr)) {", text)
+        # The fix pass runs as a dev role and is recorded separately.
+        self.assertIn("agentId: `dev_crfix_${cycle}`", text)
+        self.assertIn("stepResult.cr_fixes", text)
+        # It sits before the red-team block (independence preserved: only the dev
+        # sees CR findings). The dev-fix marker must precede the fan invocation.
+        self.assertLess(
+            text.index("DEVELOPER (CODE-REVIEW FIX)"),
+            text.index("await runFannedRedTeam(step, cycle, handoffState"),
+        )
 
     def test_rendered_schemas_have_no_duplicate_required_items(self):
         """The runtime rejects a JSON Schema whose ``required`` array has
@@ -293,6 +339,9 @@ context_economy:
         self.assertIn(sys.executable, text)
         self.assertIn(str(self.config_path.resolve()), text)
         self.assertIn(str((self.project_root / "workflow.yaml").resolve()), text)
+        self.assertIn('"timeoutSeconds": 1200.0', text)
+        self.assertIn("set timeout: ${gateTimeoutMs} — ${gateTimeoutMinutes} minute ceiling", text)
+        self.assertIn("gateTimeoutSeconds * 1000", text)
 
     def test_review_acceptance_requires_all_review_quality_flags(self):
         output = Path(render(self.config_path)["output_path"])

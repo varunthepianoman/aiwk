@@ -96,6 +96,7 @@ def render_claude_workflow(
             "name": gate_name,
             "enabled": gate.enabled,
             "description": gate.description,
+            "timeoutSeconds": gate.timeout_seconds,
             "checks": [
                 {
                     "name": check.name,
@@ -139,6 +140,14 @@ def render_claude_workflow(
             "verifyVotes": fan.verify_votes,
             "model": fan.model,
             "effort": fan.effort,
+            # Resolve the verify tier here so the runtime always gets a concrete
+            # value; empty verify_model/verify_effort inherits the attack tier.
+            "verifyModel": fan.verify_model or fan.model,
+            "verifyEffort": fan.verify_effort or fan.effort,
+            # The completeness critic only writes advisory coverage notes, so it
+            # too can run cheaper; empty inherits the attack tier.
+            "criticModel": fan.critic_model or fan.model,
+            "criticEffort": fan.critic_effort or fan.effort,
             "completenessCritic": fan.completeness_critic,
             "lenses": [{"key": lens.key, "prompt": lens.prompt} for lens in fan.lenses],
         }
@@ -378,8 +387,9 @@ const FAN_VERDICT_SCHEMA = {
   },
 };
 
-// Optional completeness critic: names attack surfaces no lens covered. Advisory
-// only -- the workflow never auto-adds lenses; it surfaces the gap for the author.
+// Optional completeness critic: names attack surfaces no lens covered. It never
+// auto-adds lenses, but its suggestions ARE piped back to the Developer (via the
+// red-team findings channel) as advisory hardening guidance for untested surfaces.
 const FAN_CRITIC_SCHEMA = {
   type: "object", additionalProperties: false,
   required: ["uncovered_surfaces", "suggested_lenses", "notes"],
@@ -939,6 +949,9 @@ function shellQuote(value) {
 }
 
 function buildGatePrompt(step, gateConfig, attempt) {
+  const gateTimeoutSeconds = Math.max(1, Number(gateConfig.timeoutSeconds ?? 600));
+  const gateTimeoutMs = Math.ceil(gateTimeoutSeconds * 1000);
+  const gateTimeoutMinutes = Math.ceil(gateTimeoutSeconds / 60);
   const command = `${shellQuote(STATIC_CONTEXT.pythonPath)} -m aiwk gate-run` +
     ` --config ${shellQuote(STATIC_CONTEXT.aiwkConfigPath)}` +
     ` --workflow-spec ${shellQuote(STATIC_CONTEXT.workflowSpecPath)}` +
@@ -952,7 +965,7 @@ You do not judge design, scope, or quality.
 Do not edit files.
 Run exactly this one AIWK command. Do not run the gate commands manually.
 
-This gate performs a clean build, full test suite, and clang-tidy over several packages and typically takes several minutes (up to ~10). Run it as a SINGLE FOREGROUND Bash call with an explicit long timeout (set timeout: 600000 — the 10-minute maximum — on the Bash call) so it completes within that one tool call and you receive its stdout directly. Do NOT run it in the background: a workflow subagent is NOT re-invoked on background-task completion, so a backgrounded gate would leave you polling an empty file until you are nudged and you would never return its result. Do not impose a shorter wall-clock cutoff of your own; the gate has its own internal per-section timeouts that govern real hangs, so honor those return codes. Only if the foreground Bash call itself reaches the 10-minute ceiling should you report that as a timeout (with the command's timed_out/rc if any) rather than guessing a result.
+This gate performs a source build, full selected test suite, result inspection, and configured static checks over several packages. Run it as a SINGLE FOREGROUND Bash call with the configured outer timeout (set timeout: ${gateTimeoutMs} — ${gateTimeoutMinutes} minute ceiling — on the Bash call) so it completes within that one tool call and you receive its stdout directly. Do NOT run it in the background: a workflow subagent is NOT re-invoked on background-task completion, so a backgrounded gate would leave you polling an empty file until you are nudged and you would never return its result. Do not impose a shorter wall-clock cutoff of your own. The configured outer timeout is authoritative even when individual internal section timeout budgets are larger. Only if the foreground Bash call itself reaches that ceiling should you report it as a timeout (with the command's timed_out/rc if any) rather than guessing a result.
 
 \`\`\`sh
 ${command}
@@ -1064,7 +1077,11 @@ __MECHANICAL_PATHS_BRANCH__
 }
 
 function formatRedFindings(red) {
-  return (red?.failures_found || []).map((finding) => `[FAIL] ${finding.test_name}: ${finding.detail}`).join("\n") || red?.notes || "Red Team reported failures.";
+  const failures = (red?.failures_found || []).map((finding) => `[FAIL] ${finding.test_name}: ${finding.detail}`).join("\n") || red?.notes || "Red Team reported failures.";
+  // Fold the completeness critic's coverage gaps into the dev-facing findings so
+  // a dev fix cycle addresses real failures AND hardens the untested surfaces.
+  const critic = (red?.critic_suggestions || "").trim();
+  return critic ? `${failures}\n\n${critic}` : failures;
 }
 
 function formatCodeReviewFindings(cr) {
@@ -1080,6 +1097,15 @@ function codeReviewBlocking(cr) {
   if (!cr) return false;
   if (cr.clean === true) return false;
   return (cr.findings || []).some((f) => f.severity === "blocker" || f.severity === "major");
+}
+
+// Any actual findings (used for the non-blocking dev fix pass). When true but
+// codeReviewBlocking is false, the findings are minor/advisory: they should be
+// addressed by a bounded dev pass BEFORE the red team rather than evaporating.
+function codeReviewHasFindings(cr) {
+  if (!cr) return false;
+  if (cr.clean === true) return false;
+  return (cr.findings || []).length > 0;
 }
 
 // Emit the /code-review filter agent. Reads the diff (or the step's touched
@@ -1111,8 +1137,10 @@ ${handoffInstructions(step, "CODE_REVIEW", 0, 0, continuation, `${agentId}_k${co
 // Emit the fanned red-team round: one blindered lens agent per configured lens
 // (run as a pipeline so each lens's findings verify as soon as that lens
 // finishes -- fast lenses are not blocked by the slow one), each finding
-// adversarially verified by `verifyVotes` refuters, aggregated into ONE
-// RED_SCHEMA report so downstream cycle/convergence routing is unchanged.
+// adversarially verified by `verifyVotes` refuters (which run on the cheaper
+// verifyModel/verifyEffort tier -- refuting a stated finding is lighter work
+// than discovering it), aggregated into ONE RED_SCHEMA report so downstream
+// cycle/convergence routing is unchanged.
 async function runFannedRedTeam(step, cycle, state, runtime, stage, results) {
   const fan = step.redteamFan;
   const attackPhase = `${step.id} red team ${cycle} attack`;
@@ -1145,7 +1173,7 @@ ${step.prompt.redteam}`,
 Adversarially verify one red-team finding. TRY TO REFUTE it. Default to real:false when uncertain.
 Finding: ${finding.test_name}
 Detail: ${finding.detail}`,
-            agentOptions({ label: `verify:${lens.key}`, phase: verifyPhase, model: fan.model, effort: fan.effort, schema: FAN_VERDICT_SCHEMA })
+            agentOptions({ label: `verify:${lens.key}`, phase: verifyPhase, model: fan.verifyModel, effort: fan.verifyEffort, schema: FAN_VERDICT_SCHEMA })
           )
         )).then((votes) => {
           const refuted = (votes || []).filter(Boolean).filter((v) => v.real === false).length;
@@ -1167,8 +1195,8 @@ Detail: ${finding.detail}`,
 The following attack lenses ran: ${fan.lenses.map((l) => l.key).join(", ")}.
 Confirmed findings so far:
 ${confirmed.map((f) => `- ${f.test_name}: ${f.detail}`).join("\n") || "(none)"}
-Name attack surfaces NO lens covered. Suggest new lens keys + rationale. You are advisory only; do not run attacks.`,
-      agentOptions({ label: `${step.id} fan critic ${cycle}`, phase: attackPhase, model: fan.model, effort: fan.effort, schema: FAN_CRITIC_SCHEMA })
+Name attack surfaces NO lens covered. Suggest new lens keys + rationale. Do not run attacks yourself; your findings are handed to the Developer as advisory guidance to harden the untested surfaces you name.`,
+      agentOptions({ label: `${step.id} fan critic ${cycle}`, phase: attackPhase, model: fan.criticModel, effort: fan.criticEffort, schema: FAN_CRITIC_SCHEMA })
     );
   }
 
@@ -1177,6 +1205,18 @@ Name attack surfaces NO lens covered. Suggest new lens keys + rationale. You are
   const status = anyBlocked ? "blocked" : (confirmed.length === 0 ? "all_passed" : "failures_found");
   const criticNote = critic
     ? `\nCompleteness critic — uncovered: ${(critic.uncovered_surfaces || []).join("; ") || "(none)"}; suggested lenses: ${(critic.suggested_lenses || []).map((s) => s.key).join(", ") || "(none)"}`
+    : "";
+  // Dev-facing rendering of the critic's coverage gaps, piped back through the
+  // red-team findings channel so the next dev cycle can proactively harden the
+  // surfaces no lens attacked. Advisory: it does not gate (it never flips
+  // `status`), so it rides along with real findings rather than forcing a cycle.
+  const criticForDev = critic
+    ? [
+        "Completeness critic (advisory) — attack surfaces NO red-team lens covered; harden these proactively even though no test failed on them:",
+        ...(critic.uncovered_surfaces || []).map((s) => `- uncovered surface: ${s}`),
+        ...(critic.suggested_lenses || []).map((s) => `- suggested angle [${s.key}]: ${s.rationale || ""}`),
+        (critic.notes || "").trim() ? `- notes: ${critic.notes.trim()}` : "",
+      ].filter(Boolean).join("\n")
     : "";
   return {
     status,
@@ -1187,6 +1227,7 @@ Name attack surfaces NO lens covered. Suggest new lens keys + rationale. You are
     external_memory_notes: "",
     handoff: "",
     notes: criticNote.trim(),
+    critic_suggestions: criticForDev,
     lens_results: lensResults.map((entry) => ({ key: entry.lens.key, confirmed: (entry.confirmed || []).length })),
   };
 }
@@ -1357,6 +1398,41 @@ ${step.prompt.dev}${redFindings ? `\n\nThe Red Team found these failures:\n${red
           redFindings = formatCodeReviewFindings(cr);
           redPassed = false;
           continue;
+        }
+        // Non-blocking (minor/advisory) findings do not gate, but they must not
+        // evaporate: run ONE bounded dev pass to address them BEFORE the red team
+        // so the fan attacks a cleaner diff. Red-team independence is preserved --
+        // only the developer sees the CR findings; the red team never does. This
+        // pass is non-gating (we proceed to the red team regardless of whether the
+        // developer resolved every minor) and does NOT re-run code review (the
+        // final review + objective gate catch any regression).
+        if (runRedThisCycle && codeReviewHasFindings(cr)) {
+          const crFixFindings = formatCodeReviewFindings(cr);
+          const crFixed = await invokeSubstantiveRoleWithContinuations({
+            step, role: "dev", cycle, attempt: 0, agentId: `dev_crfix_${cycle}`,
+            state: handoffState, runtime, stage: STAGE, results,
+            label: `${step.id} dev cr-fix ${cycle}`, model: step.model, effort: step.effort, schema: IMPL_SCHEMA,
+            promptFor: ({ continuation, continuationBlock }) => `${continuationBlock}
+=== DEVELOPER (CODE-REVIEW FIX): ${step.id} — ${step.title} (cycle ${cycle}) ===
+Address exactly these non-blocking Code Reviewer findings, then stop. Do NOT broaden scope, add features, or refactor beyond the findings. Respect invariants and out-of-scope boundaries. If a finding is a false positive or deliberately out of scope, say so in the handoff and leave it as-is; this pass does not gate the step.
+${externalMemoryRoleGuidance("dev")}
+${contextEconomyPolicy("dev")}
+${priorContextBlock(handoffState)}
+${stepResult.discovery?.handoff_path ? "Discovery did the broad map for this step. Target the files/symbols named in the Discovery handoff and the findings below; avoid global rediscovery." : "Keep discovery proportional; the findings below name the exact files."}
+${handoffInstructions(step, "DEV", cycle, 0, continuation, `dev_crfix_${cycle}_k${continuation}`)}
+
+Address exactly these Code Reviewer findings:\n${crFixFindings}`,
+          });
+          if (crFixed.halt) return crFixed.halt;
+          const crFixImpl = crFixed.output;
+          stepResult.cr_fixes = stepResult.cr_fixes || [];
+          stepResult.cr_fixes.push({ cycle, impl: crFixImpl });
+          // Adopt the fixed diff as the latest implementation only if the pass
+          // completed; a punt leaves the prior impl (and diff) in place.
+          if (crFixImpl && crFixImpl.status === "done") {
+            lastImpl = crFixImpl;
+            stepResult.impl = crFixImpl;
+          }
         }
       }
 
