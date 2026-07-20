@@ -116,6 +116,12 @@ class RedTeamFanConfig:
     verify_effort: str = ""
     critic_model: str = ""
     critic_effort: str = ""
+    # When true the expensive fan runs only on the FIRST red-team cycle; later
+    # cycles (after a dev fix) fall back to the single-agent red team, whose
+    # mandate is the step's prompt.redteam. The fan's adversarial tests persist
+    # and re-run in the objective gate, so regressions stay covered. Default
+    # false = fan every cycle (unchanged behavior).
+    fan_first_cycle_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -468,6 +474,9 @@ def _load_redteam_fan(raw: Any, base: RedTeamFanConfig, label: str) -> RedTeamFa
     critic_effort = raw.get("critic_effort", base.critic_effort)
     if not isinstance(critic_effort, str):
         raise ValueError(f"{label}.critic_effort must be a string")
+    fan_first_cycle_only = raw.get("fan_first_cycle_only", base.fan_first_cycle_only)
+    if not isinstance(fan_first_cycle_only, bool):
+        raise ValueError(f"{label}.fan_first_cycle_only must be a boolean")
     completeness_critic = raw.get("completeness_critic", base.completeness_critic)
     if not isinstance(completeness_critic, bool):
         raise ValueError(f"{label}.completeness_critic must be a boolean")
@@ -498,7 +507,7 @@ def _load_redteam_fan(raw: Any, base: RedTeamFanConfig, label: str) -> RedTeamFa
         raise ValueError(f"{label}.enabled requires at least 2 lenses (a fan of one is the single agent)")
     return RedTeamFanConfig(
         enabled, lens_tuple, verify, verify_votes, model, effort, completeness_critic,
-        verify_model, verify_effort, critic_model, critic_effort,
+        verify_model, verify_effort, critic_model, critic_effort, fan_first_cycle_only,
     )
 
 

@@ -148,6 +148,7 @@ def render_claude_workflow(
             # too can run cheaper; empty inherits the attack tier.
             "criticModel": fan.critic_model or fan.model,
             "criticEffort": fan.critic_effort or fan.effort,
+            "fanFirstCycleOnly": fan.fan_first_cycle_only,
             "completenessCritic": fan.completeness_critic,
             "lenses": [{"key": lens.key, "prompt": lens.prompt} for lens in fan.lenses],
         }
@@ -1438,7 +1439,13 @@ Address exactly these Code Reviewer findings:\n${crFixFindings}`,
 
       if (runRedThisCycle) {
         let red;
-        if (step.redteamFan && step.redteamFan.enabled) {
+        // fan_first_cycle_only spends the expensive fan on the first red-team
+        // cycle only; later cycles (after a dev fix) use the cheaper single-agent
+        // red team below. The fan's adversarial tests persist and re-run in the
+        // objective gate, so regressions on attacked surfaces stay covered.
+        const useFanThisCycle = step.redteamFan && step.redteamFan.enabled &&
+          (!step.redteamFan.fanFirstCycleOnly || cycle === 1);
+        if (useFanThisCycle) {
           // Fanned red team: parallel blindered lenses + adversarial verify,
           // aggregated into one RED_SCHEMA report (see runFannedRedTeam).
           red = await runFannedRedTeam(step, cycle, handoffState, runtime, STAGE, results);

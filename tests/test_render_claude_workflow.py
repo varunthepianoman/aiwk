@@ -182,6 +182,16 @@ context_economy:
         self.assertIn("red?.critic_suggestions", text)      # consumed by formatRedFindings
         self.assertIn("Completeness critic (advisory)", text)
 
+    def test_fan_first_cycle_only_gates_fan_to_cycle_one(self):
+        # With fan_first_cycle_only the fan runs only on cycle 1; later cycles use
+        # the single-agent red team.
+        text = Path(render(self.config_path)["output_path"]).read_text(encoding="utf-8")
+        self.assertIn("fanFirstCycleOnly", text)
+        self.assertIn(
+            "(!step.redteamFan.fanFirstCycleOnly || cycle === 1)",
+            text,
+        )
+
     def test_nonblocking_code_review_gets_dev_fix_before_redteam(self):
         # Minor/non-blocking CR findings trigger a bounded dev fix pass placed
         # BEFORE the red team, non-gating, without re-running code review.
@@ -619,7 +629,7 @@ context_economy:
         # The runtime gates guarantee inertness: the single-agent red team is only
         # skipped when the fan flag is true, and the /code-review filter only runs
         # when its flag is true.
-        self.assertIn("if (step.redteamFan && step.redteamFan.enabled)", text)
+        self.assertIn("const useFanThisCycle = step.redteamFan && step.redteamFan.enabled", text)
         self.assertIn("step.codeReview && step.codeReview.enabled", text)
 
     def test_code_review_module_renders_when_enabled(self):

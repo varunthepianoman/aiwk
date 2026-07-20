@@ -376,6 +376,17 @@ context_economy:
         self.assertEqual(step.redteam_fan.critic_model, "sonnet")
         self.assertEqual(step.redteam_fan.critic_effort, "medium")
 
+    def test_redteam_fan_first_cycle_only_defaults_false_and_parses(self):
+        spec = load_workflow_spec(self.write(starter_workflow("demo")))
+        self.assertFalse(spec.stages["build"].steps[0].redteam_fan.fan_first_cycle_only)
+        fan = ("        redteam_fan:\n          enabled: true\n"
+               "          fan_first_cycle_only: true\n          lenses:\n"
+               "            - key: a\n              prompt: attack a\n"
+               "            - key: b\n              prompt: attack b\n")
+        text = starter_workflow("demo").replace("        phases:\n", fan + "        phases:\n", 1)
+        spec = load_workflow_spec(self.write(text))
+        self.assertTrue(spec.stages["build"].steps[0].redteam_fan.fan_first_cycle_only)
+
     def test_redteam_fan_requires_two_lenses_when_enabled(self):
         fan = ("        redteam_fan:\n          enabled: true\n          lenses:\n"
                "            - key: only-one\n              prompt: attack\n")
