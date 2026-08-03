@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -194,10 +195,51 @@ class WorkflowSpec:
     context_economy: ContextEconomyConfig = field(default_factory=ContextEconomyConfig)
 
 
+def _split_flow(text: str) -> list[str]:
+    """Split a flow collection body on top-level commas, respecting quotes and
+    nested [] / {}."""
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    quote = ""
+    for char in text:
+        if quote:
+            buf.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+            buf.append(char)
+        elif char in "[{":
+            depth += 1
+            buf.append(char)
+        elif char in "]}":
+            depth -= 1
+            buf.append(char)
+        elif char == "," and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(char)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return [part for part in parts if part]
+
+
 def _scalar(text: str) -> Any:
     text = text.strip()
     if text in {"[]", "{}"}:
         return [] if text == "[]" else {}
+    if len(text) >= 2 and text[0] == "[" and text[-1] == "]":
+        return [_scalar(part) for part in _split_flow(text[1:-1])]
+    if len(text) >= 2 and text[0] == "{" and text[-1] == "}":
+        mapping: dict[Any, Any] = {}
+        for pair in _split_flow(text[1:-1]):
+            key, sep, val = pair.partition(":")
+            mapping[_scalar(key)] = _scalar(val) if sep and val.strip() else None
+        return mapping
     if text in {"true", "false"}:
         return text == "true"
     if text in {"null", "~"}:
@@ -212,7 +254,24 @@ def _scalar(text: str) -> Any:
 
 
 def load_yaml_subset(path: str | Path) -> dict[str, Any]:
-    """Load mappings, lists, and scalars used by generated workflow specs."""
+    """Load mappings, lists, and scalars used by generated workflow specs.
+
+    Supports YAML anchors / aliases / merge-keys as a convenience superset:
+
+      key: &name  <block>   registers <block> under `name`
+      key: *name            value becomes a deep copy of the anchored node
+      <<: *name             merges the anchored mapping's keys; an explicit
+                            local key already present is NOT overridden
+      - *name               list item. If the anchored node is itself a LIST
+                            its elements are SPLICED into the sequence; a
+                            mapping/scalar alias is appended as one item.
+
+    The splice rule for a list alias used as a sequence ITEM is an AIWK-specific
+    convenience (strict YAML would nest it): phase command sections are flat
+    `list[str]`, and workflows contribute shared command blocks via
+    `- *colcon_build`. Alias uses in value position and via `<<:` match strict
+    YAML exactly.
+    """
     tokens: list[tuple[int, str, int]] = []
     for number, raw in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
         if not raw.strip() or raw.lstrip().startswith("#"):
@@ -221,6 +280,14 @@ def load_yaml_subset(path: str | Path) -> dict[str, Any]:
         if "\t" in raw[:indent] or indent % 2:
             raise ValueError(f"Invalid indentation on line {number}")
         tokens.append((indent, raw.strip(), number))
+
+    anchors: dict[str, Any] = {}
+
+    def _alias(token: str, number: int) -> Any:
+        name = token[1:].strip()
+        if name not in anchors:
+            raise ValueError(f"Unknown alias '*{name}' on line {number}")
+        return copy.deepcopy(anchors[name])
 
     def parse_block(index: int, indent: int) -> tuple[Any, int]:
         if index >= len(tokens) or tokens[index][0] != indent:
@@ -238,6 +305,14 @@ def load_yaml_subset(path: str | Path) -> dict[str, Any]:
                         raise ValueError(f"Empty list item on line {number}")
                     value, index = parse_block(index + 1, tokens[index + 1][0])
                     container.append(value)
+                    continue
+                if item.startswith("*"):
+                    resolved = _alias(item, number)
+                    if isinstance(resolved, list):
+                        container.extend(resolved)
+                    else:
+                        container.append(resolved)
+                    index += 1
                     continue
                 if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*:(?:\s|$)", item):
                     key, raw_value = item.split(":", 1)
@@ -257,8 +332,56 @@ def load_yaml_subset(path: str | Path) -> dict[str, Any]:
                 raise ValueError(f"Expected key/value on line {number}")
             key, raw_value = text.split(":", 1)
             key = key.strip()
+            raw_value = raw_value.strip()
             index += 1
-            if raw_value.strip():
+            if key == "<<":
+                merge_tokens = (
+                    [t.strip() for t in raw_value[1:-1].split(",") if t.strip()]
+                    if raw_value.startswith("[")
+                    else [raw_value]
+                )
+                for tok in merge_tokens:
+                    if not tok.startswith("*"):
+                        raise ValueError(f"Merge key expects an alias on line {number}")
+                    merged = _alias(tok, number)
+                    if not isinstance(merged, dict):
+                        raise ValueError(f"Merge alias '{tok}' is not a mapping on line {number}")
+                    for merged_key, merged_value in merged.items():
+                        container.setdefault(merged_key, merged_value)
+                continue
+            if raw_value.startswith("&"):
+                parts = raw_value[1:].split(None, 1)
+                name = parts[0]
+                if len(parts) > 1 and parts[1].strip():
+                    value = _scalar(parts[1])
+                elif index < len(tokens) and tokens[index][0] > indent:
+                    value, index = parse_block(index, tokens[index][0])
+                else:
+                    value = {}
+                anchors[name] = value
+                container[key] = value
+                continue
+            if raw_value.startswith("*"):
+                container[key] = _alias(raw_value, number)
+                continue
+            if raw_value and re.fullmatch(r"[|>][+-]?\d*", raw_value):
+                # Block scalar: `|` literal (newline-joined), `>` folded
+                # (space-joined); trailing `-` strips the final newline, `+`
+                # keeps it, default clips to one. Blank/`#` lines inside the
+                # block are dropped by tokenization, so this reproduces
+                # single-paragraph values (the only kind workflows use here).
+                folded = raw_value[0] == ">"
+                chomp = "-" if "-" in raw_value else ("+" if "+" in raw_value else "")
+                lines: list[str] = []
+                while index < len(tokens) and tokens[index][0] > indent:
+                    lines.append(tokens[index][1])
+                    index += 1
+                value = (" " if folded else "\n").join(lines)
+                if chomp != "-" and value:
+                    value += "\n"
+                container[key] = value
+                continue
+            if raw_value:
                 container[key] = _scalar(raw_value)
             elif index < len(tokens) and tokens[index][0] > indent:
                 container[key], index = parse_block(index, tokens[index][0])
